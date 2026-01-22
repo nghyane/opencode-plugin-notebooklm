@@ -688,13 +688,15 @@ export class NotebookLMClient {
         Origin: BASE_URL,
         Referer: `${BASE_URL}/notebook/${notebookId}`,
         "X-Same-Domain": "1",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
       },
       body,
       signal: AbortSignal.timeout(timeout),
     });
 
     if (!response.ok) {
-      throw new Error(`Query failed: HTTP ${response.status}`);
+      const errorText = await response.text();
+      throw new Error(`Query failed: HTTP ${response.status} - ${errorText.substring(0, 1000)}`);
     }
 
     const text = await response.text();
