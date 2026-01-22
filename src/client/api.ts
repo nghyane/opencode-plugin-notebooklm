@@ -445,7 +445,9 @@ export class NotebookLMClient {
   // =========================================================================
 
   async addUrlSource(notebookId: string, url: string): Promise<Source | null> {
-    const params = [notebookId, [[2, url]], [2]];
+    // Reference: [[source_data], notebook_id, [2], [1, null, ...]]
+    // URL source_data: [2, url]
+    const params = [[[2, url]], notebookId, [2], [1, null, null, null, null, null, null, 1]];
     const result = await this.callRpc(
       RPC_IDS.ADD_SOURCE,
       params,
@@ -464,7 +466,9 @@ export class NotebookLMClient {
   }
 
   async addTextSource(notebookId: string, text: string, title = "Pasted Text"): Promise<Source | null> {
-    const params = [notebookId, [[1, [text, title]]], [2]];
+    // Reference: [[source_data], notebook_id, [2], [1, null, ...]]
+    // Text source_data: [1, [title, text]] - title first, then text!
+    const params = [[[1, [title, text]]], notebookId, [2], [1, null, null, null, null, null, null, 1]];
     const result = await this.callRpc(
       RPC_IDS.ADD_SOURCE,
       params,
@@ -487,7 +491,9 @@ export class NotebookLMClient {
     title: string,
     mimeType: string
   ): Promise<Source | null> {
-    const params = [notebookId, [[3, [documentId, title, mimeType]]], [2]];
+    // Reference: [[source_data], notebook_id, [2], [1, null, ...]]
+    // Drive source_data: [3, [doc_id, mime_type, 1, title]]
+    const params = [[[3, [documentId, mimeType, 1, title]]], notebookId, [2], [1, null, null, null, null, null, null, 1]];
     const result = await this.callRpc(
       RPC_IDS.ADD_SOURCE,
       params,
@@ -610,30 +616,43 @@ export class NotebookLMClient {
     conversationId?: string,
     timeout: number = CONSTANTS.QUERY_TIMEOUT
   ): Promise<QueryResult> {
+    // Get source IDs if not provided
+    let effectiveSourceIds: string[] = sourceIds || [];
+    if (effectiveSourceIds.length === 0) {
+      const notebook = await this.getNotebook(notebookId);
+      const sources = (notebook as { sources?: { id: string }[] })?.sources;
+      effectiveSourceIds = sources?.map((s) => s.id) || [];
+    }
+
     // Build conversation history if this is a follow-up
-    const history = conversationId
+    const conversationHistory = conversationId
       ? this.buildConversationHistory(conversationId)
       : null;
 
-    // Build source filter
-    const sourceFilter = sourceIds?.length
-      ? sourceIds.map((id) => [id])
-      : null;
+    // Generate conversation ID if new conversation
+    const effectiveConversationId = conversationId || crypto.randomUUID();
+
+    // Build sources array: [[[sid]]] for each source (3 brackets!)
+    const sourcesArray = effectiveSourceIds.map((sid) => [[[sid]]]);
+
+    // Query params structure (matching reference implementation)
+    const queryParams = [
+      sourcesArray,              // [0] sources as [[[sid]]] per source
+      queryText,                 // [1] the query text
+      conversationHistory,       // [2] null for new, history array for follow-ups
+      [2, null, [1]],            // [3] config array
+      effectiveConversationId,   // [4] conversation ID
+    ];
+
+    // Build f.req as [null, params_json] matching reference
+    const paramsJson = JSON.stringify(queryParams);
+    const fReq = JSON.stringify([null, paramsJson]);
 
     // Use streaming query endpoint
-    const reqId = this.reqidCounter++;
+    this.reqidCounter += 100000;
+    const reqId = this.reqidCounter;
     const params = new URLSearchParams({
-      "f.req": JSON.stringify([
-        notebookId,
-        queryText,
-        sourceFilter,
-        null,
-        history,
-        null,
-        null,
-        null,
-        [2],
-      ]),
+      "f.req": fReq,
       at: this.csrfToken,
       _reqid: String(reqId),
     });
@@ -747,7 +766,12 @@ export class NotebookLMClient {
 
     const rpcId = mode === "deep" ? RPC_IDS.START_DEEP_RESEARCH : RPC_IDS.START_FAST_RESEARCH;
 
-    const params = [nbId, query, sourceCode, [2]];
+    // Research params structure (matching reference implementation)
+    // Fast: [[query, source_type], null, 1, notebook_id]
+    // Deep: [null, [1], [query, source_type], 5, notebook_id]
+    const params = mode === "deep"
+      ? [null, [1], [query, sourceCode], 5, nbId]
+      : [[query, sourceCode], null, 1, nbId];
     const result = await this.callRpc(rpcId, params, `/notebook/${nbId}`);
 
     // Extract task ID from response

@@ -167,14 +167,14 @@ export const CONSTANTS = {
   RESEARCH_MODE_FAST: 1,
   RESEARCH_MODE_DEEP: 2,
 
-  // Studio types
+  // Studio types (matching reference implementation)
   STUDIO_TYPE_AUDIO: 1,
-  STUDIO_TYPE_VIDEO: 2,
-  STUDIO_TYPE_INFOGRAPHIC: 5,
-  STUDIO_TYPE_SLIDE_DECK: 6,
-  STUDIO_TYPE_REPORT: 3,
+  STUDIO_TYPE_VIDEO: 3,         // Was 2, reference says 3
+  STUDIO_TYPE_INFOGRAPHIC: 7,   // Was 5, reference says 7
+  STUDIO_TYPE_SLIDE_DECK: 8,    // Was 6, reference says 8
+  STUDIO_TYPE_REPORT: 2,        // Was 3, reference says 2
   STUDIO_TYPE_FLASHCARDS: 4,
-  STUDIO_TYPE_DATA_TABLE: 8,
+  STUDIO_TYPE_DATA_TABLE: 9,    // Was 8, reference says 9
 
   // Audio formats
   AUDIO_FORMAT_DEEP_DIVE: 1,
