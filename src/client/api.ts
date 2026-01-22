@@ -632,9 +632,9 @@ export class NotebookLMClient {
     // Generate conversation ID if new conversation
     const effectiveConversationId = conversationId || crypto.randomUUID();
 
-    // Build sources array: [[sid]] for each source (2 brackets per source!)
+    // Build sources array: [[[sid]]] for each source (3 brackets!)
     // Reference: sources_array = [[[sid]] for sid in source_ids] creates [[[s1]], [[s2]]]
-    const sourcesArray = effectiveSourceIds.map((sid) => [[sid]]);
+    const sourcesArray = effectiveSourceIds.map((sid) => [[[sid]]]);
 
     // Query params structure (matching reference implementation)
     const queryParams = [
@@ -645,28 +645,42 @@ export class NotebookLMClient {
       effectiveConversationId,   // [4] conversation ID
     ];
 
-    // Build f.req as [null, params_json] matching reference
+    // Build f.req as [null, params_json] matching reference (compact JSON)
     const paramsJson = JSON.stringify(queryParams);
     const fReq = JSON.stringify([null, paramsJson]);
 
     // Use streaming query endpoint
     this.reqidCounter += 100000;
     const reqId = this.reqidCounter;
-    const params = new URLSearchParams({
-      "f.req": fReq,
-      at: this.csrfToken,
-      _reqid: String(reqId),
-    });
 
-    const response = await fetch(`${BASE_URL}${QUERY_ENDPOINT}`, {
+    // Build body with URL encoding matching reference (trailing &)
+    const bodyParts = [
+      `f.req=${encodeURIComponent(fReq)}`,
+      `at=${encodeURIComponent(this.csrfToken)}`,
+    ];
+    const body = bodyParts.join("&") + "&";
+
+    // Build URL with all required params
+    const urlParams = new URLSearchParams({
+      bl: process.env.NOTEBOOKLM_BL || "boq_labs-tailwind-frontend_20260108.06_p0",
+      hl: "en",
+      _reqid: String(reqId),
+      rt: "c",
+    });
+    if (this.sessionId) {
+      urlParams.set("f.sid", this.sessionId);
+    }
+
+    const response = await fetch(`${BASE_URL}${QUERY_ENDPOINT}?${urlParams.toString()}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
         Cookie: cookiesToHeader(this.cookies),
         Origin: BASE_URL,
         Referer: `${BASE_URL}/notebook/${notebookId}`,
+        "X-Same-Domain": "1",
       },
-      body: params.toString(),
+      body,
       signal: AbortSignal.timeout(timeout),
     });
 
