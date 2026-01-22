@@ -620,8 +620,17 @@ export class NotebookLMClient {
     let effectiveSourceIds: string[] = sourceIds || [];
     if (effectiveSourceIds.length === 0) {
       const notebook = await this.getNotebook(notebookId);
-      const sources = (notebook as { sources?: { id: string }[] })?.sources;
-      effectiveSourceIds = sources?.map((s) => s.id) || [];
+      // notebook is raw RPC response array. Sources are at index 1.
+      // Structure: [title, [sources], id, ...]
+      // Source structure: [[id], title, ...]
+      if (Array.isArray(notebook) && notebook.length > 1 && Array.isArray(notebook[1])) {
+         effectiveSourceIds = notebook[1].map((s: any) => {
+             if (Array.isArray(s) && Array.isArray(s[0]) && s[0].length > 0) {
+                 return s[0][0]; // ID is inside a list [[id], ...]
+             }
+             return null;
+         }).filter((id: any) => id);
+      }
     }
 
     // Build conversation history if this is a follow-up
@@ -689,7 +698,25 @@ export class NotebookLMClient {
     }
 
     const text = await response.text();
-    const { answer, newConversationId } = this.parseQueryResponse(text);
+    
+    // Parse response with debug info
+    let answer = "";
+    let newConversationId: string | null = null;
+    
+    try {
+      const result = this.parseQueryResponse(text);
+      answer = result.answer;
+      newConversationId = result.newConversationId;
+    } catch (e: any) {
+      // If parsing explicitly failed (e.g. Auth error detected), rethrow
+      throw e;
+    }
+
+    if (!answer) {
+      // Return raw response for debugging "empty result" issues
+      const preview = text.length > 500 ? text.substring(0, 500) + "..." : text;
+      throw new Error(`NotebookLM returned empty answer. Debug info:\n- Status: ${response.status}\n- SourceIDs: ${effectiveSourceIds.length}\n- Response Preview: ${preview}`);
+    }
 
     // Cache conversation turn
     const convId = newConversationId || conversationId || crypto.randomUUID();
@@ -709,6 +736,8 @@ export class NotebookLMClient {
     }
 
     const lines = responseText.trim().split("\n");
+    console.error("[DEBUG] Response lines:", lines.length);
+
     let longestAnswer = "";
     let longestThinking = "";
     let conversationId: string | null = null;
@@ -727,7 +756,8 @@ export class NotebookLMClient {
       if (!isNaN(byteCount) && byteCount > 0) {
         i++;
         if (i < lines.length) {
-          const { text: extractedText, isAnswer } = this.extractAnswerFromChunk(lines[i]);
+          const { text: extractedText, isAnswer, error } = this.extractAnswerFromChunk(lines[i]);
+          if (error) throw new Error(error);
           if (extractedText) {
             if (isAnswer && extractedText.length > longestAnswer.length) {
               longestAnswer = extractedText;
@@ -739,7 +769,8 @@ export class NotebookLMClient {
         i++;
       } else {
         // Not a byte count, try to parse as JSON directly
-        const { text: extractedText, isAnswer } = this.extractAnswerFromChunk(line);
+        const { text: extractedText, isAnswer, error } = this.extractAnswerFromChunk(line);
+        if (error) throw new Error(error);
         if (extractedText) {
           if (isAnswer && extractedText.length > longestAnswer.length) {
             longestAnswer = extractedText;
@@ -756,7 +787,7 @@ export class NotebookLMClient {
     return { answer, newConversationId: conversationId };
   }
 
-  private extractAnswerFromChunk(jsonStr: string): { text: string | null; isAnswer: boolean } {
+  private extractAnswerFromChunk(jsonStr: string): { text: string | null; isAnswer: boolean; error?: string } {
     try {
       const data = JSON.parse(jsonStr);
       if (!Array.isArray(data) || data.length === 0) {
@@ -766,6 +797,14 @@ export class NotebookLMClient {
       for (const item of data) {
         if (!Array.isArray(item) || item.length < 3) continue;
         if (item[0] !== "wrb.fr") continue;
+
+        // Check for error signature: ["wrb.fr", "RPC_ID", null, null, null, [16], "generic"]
+        if (item.length > 6 && item[6] === "generic") {
+            if (Array.isArray(item[5]) && item[5].includes(16)) {
+                 return { text: null, isAnswer: false, error: "Authentication expired (RPC Error 16). Please run 'notebooklm-mcp-auth'." };
+            }
+            return { text: null, isAnswer: false, error: "Generic RPC Error from NotebookLM." };
+        }
 
         const innerJsonStr = item[2];
         if (typeof innerJsonStr !== "string") continue;
