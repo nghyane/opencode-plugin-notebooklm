@@ -1,48 +1,80 @@
 /**
- * OpenCode Plugin: NotebookLM v2
+ * OpenCode Plugin: NotebookLM v3
  * 
- * Bare-metal implementation (no SDK dependency) to avoid version mismatches.
- * Uses function validators for args to satisfy OpenCode loader.
+ * Optimized architecture:
+ * - 10 smart tools (reduced from 15)
+ * - Context inference (auto notebook_id)
+ * - Auto-polling for long operations
+ * - Unified source_add tool
  */
 
+import { tool } from "@opencode-ai/plugin";
 import { hooks } from "./hooks";
 import { getClient, resetClient } from "./client/api";
 import { saveTokensToCache, parseCookieHeader, validateCookies, type AuthTokens } from "./auth/tokens";
-
-export * from "./types";
-export { getClient, resetClient } from "./client/api";
-export { hooks } from "./hooks";
+import { getState, setActiveNotebook } from "./state/session";
+import * as cache from "./state/cache";
 
 // ============================================================================
-// Helpers
+// Helper
 // ============================================================================
 
 const json = (obj: unknown): string => JSON.stringify(obj, null, 2);
 
-// Simple validators that won't crash the loader
-// The loader likely expects: (value) => boolean | string
-const v = {
-  string: () => (val: unknown) => typeof val === 'string' ? true : "Expected string",
-  number: () => (val: unknown) => typeof val === 'number' ? true : "Expected number",
-  boolean: () => (val: unknown) => typeof val === 'boolean' ? true : "Expected boolean",
-  optional: (validator: Function) => (val: unknown) => val === undefined || val === null || validator(val),
-};
+/**
+ * Resolve notebook ID with smart inference
+ */
+async function resolveNotebookId(providedId?: string): Promise<string> {
+  if (providedId) return providedId;
+  
+  const state = getState();
+  if (state.notebookId) return state.notebookId;
+  
+  const client = getClient();
+  const notebooks = await client.listNotebooks();
+  cache.set(cache.key.notebooks(), notebooks);
+  
+  if (notebooks.length === 1) {
+    setActiveNotebook(notebooks[0].id, notebooks[0].title);
+    return notebooks[0].id;
+  }
+  
+  if (notebooks.length === 0) {
+    throw new Error("No notebooks found. Create one first with notebook_create.");
+  }
+  
+  throw new Error(
+    `Multiple notebooks exist (${notebooks.length}). Please specify notebook_id.\n` +
+    `Available: ${notebooks.slice(0, 5).map(n => `${n.title} (${n.id})`).join(", ")}`
+  );
+}
 
 // ============================================================================
-// Tool Definitions (Raw Objects)
+// Tool 1: notebook_list
 // ============================================================================
 
-const notebook_list = {
+const notebook_list = tool({
   description: "List all notebooks",
   args: {
-    max_results: v.optional(v.number()),
+    max_results: tool.schema.number().optional().describe("Max notebooks to return"),
   },
-  async execute(args: any) {
+  async execute(args) {
     try {
+      const cached = cache.get<unknown[]>(cache.key.notebooks());
+      if (cached) {
+        return json({ count: cached.length, notebooks: cached.slice(0, args.max_results ?? 20) });
+      }
+
       const client = getClient();
       const notebooks = await client.listNotebooks();
-      const max = args.max_results ?? 20;
+      cache.set(cache.key.notebooks(), notebooks);
 
+      // Auto-set if single notebook
+      if (notebooks.length === 1) {
+        setActiveNotebook(notebooks[0].id, notebooks[0].title);
+      }
+
+      const max = args.max_results ?? 20;
       return json({
         count: notebooks.length,
         notebooks: notebooks.slice(0, max).map((nb) => ({
@@ -50,47 +82,60 @@ const notebook_list = {
           title: nb.title,
           source_count: nb.sourceCount,
           url: `https://notebooklm.google.com/notebook/${nb.id}`,
-          owned: nb.isOwned,
         })),
       });
-    } catch (e: any) {
-      return json({ status: "error", error: String(e) });
+    } catch (e) {
+      return json({ error: true, message: String(e) });
     }
   },
-};
+});
 
-const notebook_create = {
+// ============================================================================
+// Tool 2: notebook_create
+// ============================================================================
+
+const notebook_create = tool({
   description: "Create a new notebook",
   args: {
-    title: v.optional(v.string()),
+    title: tool.schema.string().optional().describe("Notebook title"),
   },
-  async execute(args: any) {
+  async execute(args) {
     try {
       const client = getClient();
       const nb = await client.createNotebook(args.title || "");
-      if (!nb) throw new Error("Failed to create");
+      if (!nb) throw new Error("Failed to create notebook");
+
+      cache.del(cache.key.notebooks());
+      setActiveNotebook(nb.id, nb.title);
+
       return json({
         id: nb.id,
         title: nb.title,
         url: `https://notebooklm.google.com/notebook/${nb.id}`,
+        message: "Notebook created and set as active.",
       });
-    } catch (e: any) {
-      return json({ status: "error", error: String(e) });
+    } catch (e) {
+      return json({ error: true, message: String(e) });
     }
   },
-};
+});
 
-const notebook_get = {
-  description: "Get notebook details",
+// ============================================================================
+// Tool 3: notebook_get
+// ============================================================================
+
+const notebook_get = tool({
+  description: "Get notebook details. Use include_summary for AI summary.",
   args: {
-    notebook_id: v.string(),
-    include_summary: v.optional(v.boolean()),
+    notebook_id: tool.schema.string().optional().describe("Notebook UUID (auto-inferred if single)"),
+    include_summary: tool.schema.boolean().optional().describe("Include AI-generated summary"),
   },
-  async execute(args: any) {
+  async execute(args) {
     try {
+      const notebookId = await resolveNotebookId(args.notebook_id);
       const client = getClient();
-      const raw = await client.getNotebook(args.notebook_id);
-      
+      const raw = await client.getNotebook(notebookId);
+
       if (!raw || !Array.isArray(raw)) throw new Error("Notebook not found");
 
       const title = raw[0] || "Untitled";
@@ -100,171 +145,194 @@ const notebook_get = {
         title: src[1] || "Untitled",
       }));
 
+      setActiveNotebook(notebookId, title);
+
       const result: Record<string, unknown> = {
-        id: args.notebook_id,
+        id: notebookId,
         title,
         source_count: sources.length,
         sources: sources.slice(0, 20),
-        url: `https://notebooklm.google.com/notebook/${args.notebook_id}`,
+        url: `https://notebooklm.google.com/notebook/${notebookId}`,
       };
 
       if (args.include_summary) {
         try {
-          const summary = await client.getNotebookSummary(args.notebook_id);
+          const summary = await client.getNotebookSummary(notebookId);
           result.summary = summary.summary;
-          result.suggested_topics = summary.suggestedTopics.slice(0, 5);
-        } catch {}
+          result.suggested_topics = summary.suggestedTopics?.slice(0, 5);
+        } catch { /* ignore summary errors */ }
       }
 
       return json(result);
-    } catch (e: any) {
-      return json({ status: "error", error: String(e) });
+    } catch (e) {
+      return json({ error: true, message: String(e) });
     }
   },
-};
+});
 
-const notebook_query = {
+// ============================================================================
+// Tool 4: notebook_query
+// ============================================================================
+
+const notebook_query = tool({
   description: "Ask AI about sources in notebook",
   args: {
-    notebook_id: v.string(),
-    query: v.string(),
-    source_ids: v.optional(v.string()),
-    conversation_id: v.optional(v.string()),
+    query: tool.schema.string().describe("Question to ask"),
+    notebook_id: tool.schema.string().optional().describe("Notebook UUID (auto-inferred)"),
+    source_ids: tool.schema.string().optional().describe("Comma-separated source IDs to focus on"),
+    conversation_id: tool.schema.string().optional().describe("Continue previous conversation"),
   },
-  async execute(args: any) {
+  async execute(args) {
     try {
-      const sourceIds = args.source_ids?.split(",").map((s: string) => s.trim());
+      const notebookId = await resolveNotebookId(args.notebook_id);
+      const sourceIds = args.source_ids?.split(",").map((s) => s.trim());
+      
       const client = getClient();
-      const result = await client.query(
-        args.notebook_id,
-        args.query,
-        sourceIds,
-        args.conversation_id
-      );
+      const result = await client.query(notebookId, args.query, sourceIds, args.conversation_id);
+      
       return json({
         answer: result.answer,
         conversation_id: result.conversationId,
+        notebook_id: notebookId,
       });
-    } catch (e: any) {
-      return json({ status: "error", error: String(e) });
+    } catch (e) {
+      return json({ error: true, message: String(e) });
     }
   },
-};
+});
 
-const notebook_delete = {
+// ============================================================================
+// Tool 5: notebook_delete
+// ============================================================================
+
+const notebook_delete = tool({
   description: "Delete notebook permanently. IRREVERSIBLE.",
   args: {
-    notebook_id: v.string(),
-    confirm: v.boolean(),
+    notebook_id: tool.schema.string().describe("Notebook UUID"),
+    confirm: tool.schema.boolean().describe("Must be true to confirm deletion"),
   },
-  async execute(args: any) {
-    if (!args.confirm) return json({ status: "error", error: "Set confirm=true" });
+  async execute(args) {
+    if (!args.confirm) {
+      return json({ error: true, message: "Set confirm=true after user approval" });
+    }
     try {
       const client = getClient();
       await client.deleteNotebook(args.notebook_id);
-      return json({ message: "Deleted" });
-    } catch (e: any) {
-      return json({ status: "error", error: String(e) });
+      
+      cache.del(cache.key.notebooks());
+      cache.del(cache.key.notebook(args.notebook_id));
+      
+      const state = getState();
+      if (state.notebookId === args.notebook_id) {
+        setActiveNotebook(null, null);
+      }
+      
+      return json({ message: "Notebook deleted successfully" });
+    } catch (e) {
+      return json({ error: true, message: String(e) });
     }
   },
-};
+});
 
-const notebook_rename = {
+// ============================================================================
+// Tool 6: notebook_rename
+// ============================================================================
+
+const notebook_rename = tool({
   description: "Rename a notebook",
   args: {
-    notebook_id: v.string(),
-    new_title: v.string(),
+    notebook_id: tool.schema.string().describe("Notebook UUID"),
+    new_title: tool.schema.string().describe("New title"),
   },
-  async execute(args: any) {
+  async execute(args) {
     try {
       const client = getClient();
       await client.renameNotebook(args.notebook_id, args.new_title);
-      return json({ title: args.new_title });
-    } catch (e: any) {
-      return json({ status: "error", error: String(e) });
+      
+      cache.del(cache.key.notebooks());
+      cache.del(cache.key.notebook(args.notebook_id));
+      setActiveNotebook(args.notebook_id, args.new_title);
+      
+      return json({ id: args.notebook_id, title: args.new_title });
+    } catch (e) {
+      return json({ error: true, message: String(e) });
     }
   },
-};
+});
 
-const notebook_add_url = {
-  description: "Add URL source",
+// ============================================================================
+// Tool 7: source_add (UNIFIED - replaces notebook_add_url/text/drive)
+// ============================================================================
+
+const source_add = tool({
+  description: "Add source to notebook. Auto-detects type: URL (http...), Drive ID (alphanumeric), or Text.",
   args: {
-    notebook_id: v.string(),
-    url: v.string(),
+    content: tool.schema.string().describe("URL, Google Drive document ID, or text content"),
+    notebook_id: tool.schema.string().optional().describe("Notebook UUID (auto-inferred)"),
+    title: tool.schema.string().optional().describe("Title for text/drive sources"),
   },
-  async execute(args: any) {
+  async execute(args) {
     try {
+      const notebookId = await resolveNotebookId(args.notebook_id);
       const client = getClient();
-      const source = await client.addUrlSource(args.notebook_id, args.url);
-      if (!source) throw new Error("Failed");
-      return json({ source });
-    } catch (e: any) {
-      return json({ status: "error", error: String(e) });
+      const content = args.content.trim();
+      
+      let source: Awaited<ReturnType<typeof client.addUrlSource>>;
+      let sourceType: string;
+      
+      // Auto-detect type
+      if (/^https?:\/\//i.test(content)) {
+        // URL
+        sourceType = "url";
+        source = await client.addUrlSource(notebookId, content);
+      } else if (/^[a-zA-Z0-9_-]{25,50}$/.test(content)) {
+        // Google Drive ID pattern
+        sourceType = "drive";
+        source = await client.addDriveSource(
+          notebookId, 
+          content, 
+          args.title || "Drive Document",
+          "application/vnd.google-apps.document"
+        );
+      } else {
+        // Text content
+        sourceType = "text";
+        source = await client.addTextSource(notebookId, content, args.title || "Pasted Text");
+      }
+      
+      if (!source) throw new Error("Failed to add source");
+      
+      cache.del(cache.key.notebook(notebookId));
+      
+      return json({
+        source,
+        type: sourceType,
+        notebook_id: notebookId,
+      });
+    } catch (e) {
+      return json({ error: true, message: String(e) });
     }
   },
-};
+});
 
-const notebook_add_text = {
-  description: "Add text source",
-  args: {
-    notebook_id: v.string(),
-    text: v.string(),
-    title: v.optional(v.string()),
-  },
-  async execute(args: any) {
-    try {
-      const client = getClient();
-      const source = await client.addTextSource(args.notebook_id, args.text, args.title || "Pasted Text");
-      if (!source) throw new Error("Failed");
-      return json({ source });
-    } catch (e: any) {
-      return json({ status: "error", error: String(e) });
-    }
-  },
-};
+// ============================================================================
+// Tool 8: source_get
+// ============================================================================
 
-const notebook_add_drive = {
-  description: "Add Drive source",
-  args: {
-    notebook_id: v.string(),
-    document_id: v.string(),
-    title: v.string(),
-    doc_type: v.optional(v.string()),
-  },
-  async execute(args: any) {
-    try {
-      const mimeTypes: Record<string, string> = {
-        doc: "application/vnd.google-apps.document",
-        slides: "application/vnd.google-apps.presentation",
-        sheets: "application/vnd.google-apps.spreadsheet",
-        pdf: "application/pdf",
-      };
-      const mimeType = mimeTypes[args.doc_type || "doc"];
-      if (!mimeType) return json({ status: "error", error: "Invalid doc_type" });
-
-      const client = getClient();
-      const source = await client.addDriveSource(args.notebook_id, args.document_id, args.title, mimeType);
-      if (!source) throw new Error("Failed");
-      return json({ source });
-    } catch (e: any) {
-      return json({ status: "error", error: String(e) });
-    }
-  },
-};
-
-const source_get = {
+const source_get = tool({
   description: "Get source content/metadata",
   args: {
-    source_id: v.string(),
-    include_content: v.optional(v.boolean()),
-    include_summary: v.optional(v.boolean()),
+    source_id: tool.schema.string().describe("Source UUID"),
+    include_content: tool.schema.boolean().optional().describe("Include full text content"),
+    include_summary: tool.schema.boolean().optional().describe("Include AI-generated summary"),
   },
-  async execute(args: any) {
+  async execute(args) {
     try {
       const client = getClient();
       const content = await client.getSourceContent(args.source_id);
-      
+
       const result: Record<string, unknown> = {
+        id: args.source_id,
         title: content.title,
         type: content.sourceType,
         url: content.url,
@@ -273,7 +341,7 @@ const source_get = {
 
       if (args.include_content) {
         result.content = content.content.length > 50000
-          ? content.content.slice(0, 50000) + "\n[Truncated]"
+          ? content.content.slice(0, 50000) + "\n[Truncated at 50k chars]"
           : content.content;
       }
 
@@ -282,138 +350,281 @@ const source_get = {
           const guide = await client.getSourceGuide(args.source_id);
           result.summary = guide.summary;
           result.keywords = guide.keywords;
-        } catch {}
+        } catch { /* ignore */ }
       }
 
+      cache.set(cache.key.source(args.source_id), result);
       return json(result);
-    } catch (e: any) {
-      return json({ status: "error", error: String(e) });
+    } catch (e) {
+      return json({ error: true, message: String(e) });
     }
   },
-};
+});
 
-const source_delete = {
-  description: "Delete source",
+// ============================================================================
+// Tool 9: source_delete
+// ============================================================================
+
+const source_delete = tool({
+  description: "Delete source from notebook",
   args: {
-    source_id: v.string(),
-    confirm: v.boolean(),
+    source_id: tool.schema.string().describe("Source UUID"),
+    confirm: tool.schema.boolean().describe("Must be true to confirm deletion"),
   },
-  async execute(args: any) {
-    if (!args.confirm) return json({ status: "error", error: "Set confirm=true" });
+  async execute(args) {
+    if (!args.confirm) {
+      return json({ error: true, message: "Set confirm=true after user approval" });
+    }
     try {
       const client = getClient();
       await client.deleteSource(args.source_id);
-      return json({ message: "Deleted" });
-    } catch (e: any) {
-      return json({ status: "error", error: String(e) });
+      cache.del(cache.key.source(args.source_id));
+      return json({ message: "Source deleted successfully" });
+    } catch (e) {
+      return json({ error: true, message: String(e) });
     }
   },
-};
+});
 
-const research_start = {
-  description: "Start research",
+// ============================================================================
+// Tool 10: research_start (with auto-polling)
+// ============================================================================
+
+const research_start = tool({
+  description: "Start web research. Blocks until complete by default (use wait=false for async).",
   args: {
-    query: v.string(),
-    source: v.optional(v.string()),
-    mode: v.optional(v.string()),
-    notebook_id: v.optional(v.string()),
-    title: v.optional(v.string()),
+    query: tool.schema.string().describe("Research query"),
+    notebook_id: tool.schema.string().optional().describe("Add to existing notebook (auto-inferred)"),
+    source: tool.schema.string().optional().describe("web|scholar (default: web)"),
+    mode: tool.schema.string().optional().describe("quick|deep (default: quick)"),
+    title: tool.schema.string().optional().describe("New notebook title if no notebook_id"),
+    wait: tool.schema.boolean().optional().describe("Wait for completion (default: true)"),
+    max_wait: tool.schema.number().optional().describe("Max wait seconds (default: 120)"),
   },
-  async execute(args: any) {
+  async execute(args) {
     try {
       const client = getClient();
-      const result = await client.startResearch(
+      const wait = args.wait !== false;
+      const maxWait = (args.max_wait ?? 120) * 1000;
+      
+      // Resolve or create notebook
+      let notebookId: string;
+      if (args.notebook_id) {
+        notebookId = args.notebook_id;
+      } else {
+        try {
+          notebookId = await resolveNotebookId();
+        } catch {
+          // Create new notebook
+          const nb = await client.createNotebook(args.title || `Research: ${args.query.slice(0, 30)}`);
+          if (!nb) throw new Error("Failed to create notebook");
+          notebookId = nb.id;
+          setActiveNotebook(nb.id, nb.title);
+        }
+      }
+      
+      const task = await client.startResearch(
         args.query,
         (args.source as "web" | "drive") || "web",
         (args.mode as "fast" | "deep") || "fast",
-        args.notebook_id,
+        notebookId,
         args.title
       );
-      return json({
-        notebook_id: result.notebookId,
-        task_id: result.taskId,
-        message: "Research started. Auto-imports when done.",
-      });
-    } catch (e: any) {
-      return json({ status: "error", error: String(e) });
-    }
-  },
-};
-
-const studio_create = {
-  description: "Generate studio content",
-  args: {
-    notebook_id: v.string(),
-    type: v.string(),
-    confirm: v.boolean(),
-    focus_prompt: v.optional(v.string()),
-    language: v.optional(v.string()),
-  },
-  async execute(args: any) {
-    if (!args.confirm) return json({ status: "error", error: "Set confirm=true" });
-    try {
-      const client = getClient();
       
-      if (args.type === "mind_map") {
-        const result = await client.createMindMap(args.notebook_id);
-        return json({ type: "mind_map", id: result.id });
+      if (!wait) {
+        return json({
+          task_id: task.taskId,
+          notebook_id: notebookId,
+          status: "pending",
+          message: "Research started. Check back later or use session.idle hook.",
+        });
       }
-
-      const opts: Record<string, unknown> = {};
-      if (args.focus_prompt) opts.focus_prompt = args.focus_prompt;
-      if (args.language) opts.language = args.language;
-
-      const artifactId = await client.createStudioContent(
-        args.notebook_id,
-        args.type as any,
-        opts
-      );
-
+      
+      // Poll until complete
+      const startTime = Date.now();
+      const pollInterval = 3000;
+      
+      while (Date.now() - startTime < maxWait) {
+        await new Promise(r => setTimeout(r, pollInterval));
+        
+        const status = await client.pollResearch(task.taskId, notebookId);
+        
+        if (status.status === "completed") {
+          // Auto-import sources (returns count)
+          const importCount = await client.importResearchSources(notebookId, task.taskId);
+          cache.del(cache.key.notebook(notebookId));
+          
+          return json({
+            task_id: task.taskId,
+            notebook_id: notebookId,
+            status: "completed",
+            sources_imported: importCount,
+          });
+        }
+        
+        if (status.status === "failed") {
+          return json({
+            error: true,
+            task_id: task.taskId,
+            message: "Research failed",
+          });
+        }
+      }
+      
       return json({
-        type: args.type,
-        artifact_id: artifactId,
-        message: "Generation started.",
+        task_id: task.taskId,
+        notebook_id: notebookId,
+        status: "timeout",
+        message: `Research still running after ${args.max_wait ?? 120}s. Check back later.`,
       });
-    } catch (e: any) {
-      return json({ status: "error", error: String(e) });
+    } catch (e) {
+      return json({ error: true, message: String(e) });
     }
   },
-};
+});
 
-const studio_delete = {
+// ============================================================================
+// Tool 11: studio_create (with auto-polling)
+// ============================================================================
+
+const studio_create = tool({
+  description: "Generate studio content. Blocks until complete by default.",
+  args: {
+    type: tool.schema.string().describe("audio_overview|audio_deep_dive|briefing_doc|faq|study_guide|timeline|mindmap"),
+    notebook_id: tool.schema.string().optional().describe("Notebook UUID (auto-inferred)"),
+    focus_prompt: tool.schema.string().optional().describe("Focus topic or custom instructions"),
+    language: tool.schema.string().optional().describe("Language code (default: en)"),
+    confirm: tool.schema.boolean().describe("Must be true to start generation"),
+    wait: tool.schema.boolean().optional().describe("Wait for completion (default: true)"),
+    max_wait: tool.schema.number().optional().describe("Max wait seconds (default: 180)"),
+  },
+  async execute(args) {
+    if (!args.confirm) {
+      return json({ error: true, message: "Set confirm=true to start generation" });
+    }
+    
+    try {
+      const notebookId = await resolveNotebookId(args.notebook_id);
+      const client = getClient();
+      const wait = args.wait !== false;
+      const maxWait = (args.max_wait ?? 180) * 1000;
+      
+      // Handle mindmap separately
+      if (args.type === "mindmap" || args.type === "mind_map") {
+        const result = await client.createMindMap(notebookId);
+        return json({
+          type: "mindmap",
+          id: result.id,
+          notebook_id: notebookId,
+          status: "complete",
+        });
+      }
+      
+      const opts: Record<string, unknown> = {};
+      if (args.focus_prompt) opts.focusPrompt = args.focus_prompt;
+      if (args.language) opts.language = args.language;
+      
+      // createStudioContent returns artifact ID string
+      const artifactId = await client.createStudioContent(notebookId, args.type as any, opts);
+      
+      if (!wait) {
+        return json({
+          artifact_id: artifactId,
+          type: args.type,
+          notebook_id: notebookId,
+          status: "pending",
+          message: "Generation started. Check back later.",
+        });
+      }
+      
+      // Poll until complete - pollStudioStatus returns StudioArtifact[]
+      const startTime = Date.now();
+      const pollInterval = 5000;
+      
+      while (Date.now() - startTime < maxWait) {
+        await new Promise(r => setTimeout(r, pollInterval));
+        
+        const artifacts = await client.pollStudioStatus(notebookId);
+        const artifact = artifacts.find(a => a.id === artifactId);
+        
+        if (artifact?.status === "ready") {
+          return json({
+            artifact_id: artifactId,
+            type: args.type,
+            notebook_id: notebookId,
+            status: "ready",
+            content: artifact,
+          });
+        }
+        
+        if (artifact?.status === "failed") {
+          return json({
+            error: true,
+            artifact_id: artifactId,
+            message: "Generation failed",
+          });
+        }
+      }
+      
+      return json({
+        artifact_id: artifactId,
+        type: args.type,
+        notebook_id: notebookId,
+        status: "timeout",
+        message: `Generation still running after ${args.max_wait ?? 180}s.`,
+      });
+    } catch (e) {
+      return json({ error: true, message: String(e) });
+    }
+  },
+});
+
+// ============================================================================
+// Tool 12: studio_delete
+// ============================================================================
+
+const studio_delete = tool({
   description: "Delete studio artifact",
   args: {
-    notebook_id: v.string(),
-    artifact_id: v.string(),
-    confirm: v.boolean(),
+    artifact_id: tool.schema.string().describe("Artifact UUID"),
+    notebook_id: tool.schema.string().optional().describe("Notebook UUID (auto-inferred)"),
+    confirm: tool.schema.boolean().describe("Must be true to confirm deletion"),
   },
-  async execute(args: any) {
-    if (!args.confirm) return json({ status: "error", error: "Set confirm=true" });
+  async execute(args) {
+    if (!args.confirm) {
+      return json({ error: true, message: "Set confirm=true after user approval" });
+    }
     try {
+      const notebookId = await resolveNotebookId(args.notebook_id);
       const client = getClient();
-      await client.deleteStudioArtifact(args.notebook_id, args.artifact_id);
-      return json({ message: "Deleted" });
-    } catch (e: any) {
-      return json({ status: "error", error: String(e) });
+      await client.deleteStudioArtifact(notebookId, args.artifact_id);
+      return json({ message: "Artifact deleted successfully" });
+    } catch (e) {
+      return json({ error: true, message: String(e) });
     }
   },
-};
+});
 
-const auth_save = {
-  description: "Save auth tokens",
+// ============================================================================
+// Tool 13: save_auth_tokens
+// ============================================================================
+
+const save_auth_tokens = tool({
+  description: "Save auth tokens from browser cookies",
   args: {
-    cookies: v.string(),
-    csrf_token: v.optional(v.string()),
-    session_id: v.optional(v.string()),
+    cookies: tool.schema.string().describe("Cookie header string from browser"),
+    csrf_token: tool.schema.string().optional().describe("CSRF token (auto-refreshes if not provided)"),
+    session_id: tool.schema.string().optional().describe("Session ID"),
   },
-  async execute(args: any) {
+  async execute(args) {
     try {
       const cookies = parseCookieHeader(args.cookies);
 
       if (!validateCookies(cookies)) {
         return json({
-          status: "error",
-          error: "Missing required cookies: SID, HSID, SSID, APISID, SAPISID",
+          error: true,
+          message: "Missing required cookies. Need: SID, HSID, SSID, APISID, SAPISID",
+          suggestion: "Copy all cookies from NotebookLM in browser DevTools > Network > any request > Request Headers > Cookie",
         });
       }
 
@@ -431,11 +642,11 @@ const auth_save = {
         status: "success",
         message: "Auth tokens saved. CSRF will auto-refresh on first API call.",
       });
-    } catch (e: any) {
-      return json({ status: "error", error: String(e) });
+    } catch (e) {
+      return json({ error: true, message: String(e) });
     }
-  }
-};
+  },
+});
 
 // ============================================================================
 // Plugin Export
@@ -445,21 +656,23 @@ export default async function plugin() {
   return {
     name: "notebooklm",
     tool: {
+      // Notebook operations (6)
       notebook_list,
       notebook_create,
       notebook_get,
       notebook_query,
       notebook_delete,
       notebook_rename,
-      notebook_add_url,
-      notebook_add_text,
-      notebook_add_drive,
+      // Source operations (3) - unified add
+      source_add,
       source_get,
       source_delete,
+      // Research & Studio (3) - with auto-polling
       research_start,
       studio_create,
       studio_delete,
-      save_auth_tokens: auth_save,
+      // Auth (1)
+      save_auth_tokens,
     },
     hooks,
   };

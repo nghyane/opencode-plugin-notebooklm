@@ -8,6 +8,9 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import type { AuthTokens } from "../types";
 import { REQUIRED_COOKIES } from "../types";
 
+// Re-export AuthTokens type for consumers
+export type { AuthTokens } from "../types";
+
 const CACHE_DIR = join(homedir(), ".notebooklm-mcp");
 const CACHE_PATH = join(CACHE_DIR, "auth.json");
 

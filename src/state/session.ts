@@ -1,133 +1,213 @@
 /**
- * Session State
- * 
- * Minimal state - chỉ track context cần thiết cho compaction
+ * Enhanced Session State with context inference
  */
 
-// ============================================================================
-// State Shape (flat, minimal)
-// ============================================================================
+export interface PendingTask {
+  id: string;
+  type: 'research' | 'studio';
+  notebookId: string;
+  status: 'pending' | 'processing' | 'complete' | 'error';
+  startedAt: number;
+  lastCheckedAt?: number;
+  result?: unknown;
+  error?: string;
+}
 
-interface State {
-  // Current context
+export interface SessionState {
+  // Current context (auto-inference)
   notebookId: string | null;
   notebookTitle: string | null;
-  conversationId: string | null;
+  lastSourceId: string | null;
   
-  // Last query for context preservation
+  // Conversation state
+  conversationId: string | null;
   lastQuery: string | null;
   lastAnswer: string | null;
   
-  // Background tasks (pending only, không cache results)
-  pendingTasks: Array<{
-    type: "research" | "studio";
-    id: string;
-    notebookId: string;
-    label: string;
-  }>;
+  // Background tasks
+  pendingTasks: PendingTask[];
+  
+  // Auth status
+  authValid: boolean;
+  lastAuthCheck: number;
+  
+  // Timestamps
+  lastActivity: number;
+  sessionStartedAt: number;
 }
 
-let state: State = {
+// Default state
+const defaultState: SessionState = {
   notebookId: null,
   notebookTitle: null,
+  lastSourceId: null,
   conversationId: null,
   lastQuery: null,
   lastAnswer: null,
   pendingTasks: [],
+  authValid: false,
+  lastAuthCheck: 0,
+  lastActivity: Date.now(),
+  sessionStartedAt: Date.now(),
 };
 
-// ============================================================================
-// Getters
-// ============================================================================
+// In-memory state
+let state: SessionState = { ...defaultState };
 
-export const getState = (): Readonly<State> => state;
-
-export const getActiveNotebook = () => ({
-  id: state.notebookId,
-  title: state.notebookTitle,
-});
-
-export const getConversation = () => ({
-  id: state.conversationId,
-  lastQuery: state.lastQuery,
-  lastAnswer: state.lastAnswer,
-});
-
-export const getPendingTasks = () => state.pendingTasks;
-
-// ============================================================================
-// Setters (immutable updates)
-// ============================================================================
-
-export function setActiveNotebook(id: string | null, title?: string): void {
-  state = {
-    ...state,
-    notebookId: id,
-    notebookTitle: title || id,
-  };
+/**
+ * Get current state (read-only)
+ */
+export function getState(): Readonly<SessionState> {
+  return state;
 }
 
-export function setConversation(id: string | null, query?: string, answer?: string): void {
-  state = {
-    ...state,
-    conversationId: id,
-    ...(query && { lastQuery: query }),
-    ...(answer && { lastAnswer: answer?.slice(0, 300) }), // Only keep summary
-  };
+/**
+ * Update state partially
+ */
+export function updateState(partial: Partial<SessionState>): void {
+  state = { ...state, ...partial, lastActivity: Date.now() };
 }
 
-export function addPendingTask(
-  type: "research" | "studio",
-  id: string,
-  notebookId: string,
-  label: string
+/**
+ * Set active notebook
+ */
+export function setActiveNotebook(id: string | null, title: string | null): void {
+  updateState({ notebookId: id, notebookTitle: title });
+}
+
+/**
+ * Set last source (for context inference)
+ */
+export function setLastSource(sourceId: string | null): void {
+  updateState({ lastSourceId: sourceId });
+}
+
+/**
+ * Set conversation context
+ */
+export function setConversation(
+  conversationId: string | null,
+  lastQuery?: string,
+  lastAnswer?: string
 ): void {
-  state = {
-    ...state,
-    pendingTasks: [...state.pendingTasks, { type, id, notebookId, label }],
+  updateState({
+    conversationId,
+    lastQuery: lastQuery ?? state.lastQuery,
+    lastAnswer: lastAnswer ?? state.lastAnswer,
+  });
+}
+
+/**
+ * Get active notebook (returns id and title)
+ */
+export function getActiveNotebook(): { id: string | null; title: string | null } {
+  return { id: state.notebookId, title: state.notebookTitle };
+}
+
+/**
+ * Get conversation state
+ */
+export function getConversation(): {
+  conversationId: string | null;
+  lastQuery: string | null;
+  lastAnswer: string | null;
+} {
+  return {
+    conversationId: state.conversationId,
+    lastQuery: state.lastQuery,
+    lastAnswer: state.lastAnswer,
   };
 }
 
-export function removePendingTask(id: string): void {
-  state = {
-    ...state,
-    pendingTasks: state.pendingTasks.filter((t) => t.id !== id),
-  };
+/**
+ * Add pending task
+ */
+export function addPendingTask(task: PendingTask): void {
+  const existing = state.pendingTasks.findIndex(t => t.id === task.id);
+  if (existing >= 0) {
+    state.pendingTasks[existing] = task;
+  } else {
+    state.pendingTasks.push(task);
+  }
+  updateState({ pendingTasks: [...state.pendingTasks] });
 }
 
+/**
+ * Update pending task status
+ */
+export function updatePendingTask(
+  taskId: string,
+  updates: Partial<PendingTask>
+): void {
+  const task = state.pendingTasks.find(t => t.id === taskId);
+  if (task) {
+    Object.assign(task, updates, { lastCheckedAt: Date.now() });
+    updateState({ pendingTasks: [...state.pendingTasks] });
+  }
+}
+
+/**
+ * Remove pending task
+ */
+export function removePendingTask(taskId: string): void {
+  const filtered = state.pendingTasks.filter(t => t.id !== taskId);
+  updateState({ pendingTasks: filtered });
+}
+
+/**
+ * Get pending tasks by type
+ */
+export function getPendingTasks(type?: 'research' | 'studio'): PendingTask[] {
+  if (!type) return state.pendingTasks;
+  return state.pendingTasks.filter(t => t.type === type);
+}
+
+/**
+ * Set auth status
+ */
+export function setAuthStatus(valid: boolean): void {
+  updateState({ authValid: valid, lastAuthCheck: Date.now() });
+}
+
+/**
+ * Check if auth was recently validated
+ */
+export function isAuthRecent(maxAgeMs: number = 5 * 60 * 1000): boolean {
+  return state.authValid && (Date.now() - state.lastAuthCheck) < maxAgeMs;
+}
+
+/**
+ * Reset state
+ */
 export function reset(): void {
-  state = {
-    notebookId: null,
-    notebookTitle: null,
-    conversationId: null,
-    lastQuery: null,
-    lastAnswer: null,
-    pendingTasks: [],
-  };
+  state = { ...defaultState, sessionStartedAt: Date.now() };
 }
 
-// ============================================================================
-// Context Summary (for session compaction)
-// ============================================================================
-
+/**
+ * Get context summary for AI
+ */
 export function getContextSummary(): string {
   const parts: string[] = [];
-
-  if (state.notebookId) {
-    parts.push(`Notebook: ${state.notebookTitle} (${state.notebookId})`);
+  
+  if (state.notebookTitle) {
+    parts.push(`Active notebook: "${state.notebookTitle}" (${state.notebookId})`);
   }
-
-  if (state.conversationId && state.lastQuery) {
-    parts.push(`Last Q: "${state.lastQuery}"`);
-    if (state.lastAnswer) {
-      parts.push(`Last A: ${state.lastAnswer}`);
+  
+  if (state.lastSourceId) {
+    parts.push(`Last source: ${state.lastSourceId}`);
+  }
+  
+  if (state.conversationId) {
+    parts.push(`Conversation active`);
+    if (state.lastQuery) {
+      parts.push(`Last query: "${state.lastQuery.slice(0, 50)}..."`);
     }
   }
-
-  if (state.pendingTasks.length > 0) {
-    const tasks = state.pendingTasks.map((t) => `${t.type}:${t.label}`);
-    parts.push(`Pending: ${tasks.join(", ")}`);
+  
+  const pending = state.pendingTasks.filter(t => t.status === 'pending' || t.status === 'processing');
+  if (pending.length > 0) {
+    parts.push(`Pending tasks: ${pending.map(t => `${t.type}:${t.id.slice(0, 8)}`).join(', ')}`);
   }
-
-  return parts.join("\n");
+  
+  return parts.length > 0 ? parts.join('\n') : 'No active context';
 }

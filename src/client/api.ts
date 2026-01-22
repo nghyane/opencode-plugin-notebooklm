@@ -26,6 +26,7 @@ import {
   extractCsrfFromHtml,
   extractSessionIdFromHtml,
 } from "../auth/tokens";
+import { fetchWithRecovery, type StructuredError } from "./recovery";
 
 const BASE_URL = "https://notebooklm.google.com";
 const BATCHEXECUTE_URL = `${BASE_URL}/_/LabsTailwindUi/data/batchexecute`;
@@ -63,44 +64,48 @@ export class NotebookLMClient {
 
   /**
    * Refresh CSRF token and session ID by fetching NotebookLM homepage
+   * Returns true if refresh succeeded, false otherwise
    */
-  private async refreshAuthTokens(): Promise<void> {
-    const cookieHeader = cookiesToHeader(this.cookies);
+  private async refreshAuthTokens(): Promise<boolean> {
+    try {
+      const cookieHeader = cookiesToHeader(this.cookies);
 
-    const response = await fetch(BASE_URL + "/", {
-      headers: {
-        ...PAGE_FETCH_HEADERS,
-        Cookie: cookieHeader,
-      },
-      redirect: "follow",
-    });
+      const response = await fetch(BASE_URL + "/", {
+        headers: {
+          ...PAGE_FETCH_HEADERS,
+          Cookie: cookieHeader,
+        },
+        redirect: "follow",
+      });
 
-    const finalUrl = response.url;
-    if (finalUrl.includes("accounts.google.com")) {
-      throw new Error(
-        "Authentication expired. Run 'notebooklm-mcp-auth' via Bash/terminal to re-authenticate."
-      );
+      const finalUrl = response.url;
+      if (finalUrl.includes("accounts.google.com")) {
+        return false;
+      }
+
+      if (!response.ok) {
+        return false;
+      }
+
+      const html = await response.text();
+
+      const csrf = extractCsrfFromHtml(html);
+      if (!csrf) {
+        return false;
+      }
+      this.csrfToken = csrf;
+
+      const sid = extractSessionIdFromHtml(html);
+      if (sid) {
+        this.sessionId = sid;
+      }
+
+      // Update cache
+      this.updateCachedTokens();
+      return true;
+    } catch {
+      return false;
     }
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch NotebookLM page: HTTP ${response.status}`);
-    }
-
-    const html = await response.text();
-
-    const csrf = extractCsrfFromHtml(html);
-    if (!csrf) {
-      throw new Error("Could not extract CSRF token from page");
-    }
-    this.csrfToken = csrf;
-
-    const sid = extractSessionIdFromHtml(html);
-    if (sid) {
-      this.sessionId = sid;
-    }
-
-    // Update cache
-    this.updateCachedTokens();
   }
 
   private updateCachedTokens(): void {
@@ -240,59 +245,42 @@ export class NotebookLMClient {
   }
 
   /**
-   * Execute RPC call with retry on auth failure
+   * Execute RPC call with recovery (retry, backoff, auth refresh)
    */
   private async callRpc(
     rpcId: string,
     params: unknown,
     path = "/",
-    timeout: number = CONSTANTS.DEFAULT_TIMEOUT,
-    retry = false
+    timeout: number = CONSTANTS.DEFAULT_TIMEOUT
   ): Promise<unknown> {
     const body = this.buildRequestBody(rpcId, params);
     const url = this.buildUrl(rpcId, path);
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-          Origin: BASE_URL,
-          Referer: `${BASE_URL}/`,
-          Cookie: cookiesToHeader(this.cookies),
-          "X-Same-Domain": "1",
-          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        },
-        body,
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        if ((response.status === 401 || response.status === 403) && !retry) {
-          await this.refreshAuthTokens();
-          return this.callRpc(rpcId, params, path, timeout, true);
-        }
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    return fetchWithRecovery(
+      () =>
+        fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+            Origin: BASE_URL,
+            Referer: `${BASE_URL}/`,
+            Cookie: cookiesToHeader(this.cookies),
+            "X-Same-Domain": "1",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+          },
+          body,
+          signal: AbortSignal.timeout(timeout),
+        }),
+      async (response) => {
+        const text = await response.text();
+        const parsed = this.parseResponse(text);
+        return this.extractRpcResult(parsed, rpcId);
+      },
+      async () => {
+        // Auth refresh callback
+        return await this.refreshAuthTokens();
       }
-
-      const text = await response.text();
-      const parsed = this.parseResponse(text);
-      return this.extractRpcResult(parsed, rpcId);
-    } catch (e) {
-      clearTimeout(timeoutId);
-
-      if (e instanceof Error && e.message.includes("Authentication expired") && !retry) {
-        await this.refreshAuthTokens();
-        return this.callRpc(rpcId, params, path, timeout, true);
-      }
-
-      throw e;
-    }
+    );
   }
 
   // =========================================================================
