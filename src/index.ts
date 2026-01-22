@@ -12,7 +12,7 @@ import { tool } from "@opencode-ai/plugin";
 import { hooks } from "./hooks";
 import { getClient, resetClient } from "./client/api";
 import { saveTokensToCache, parseCookieHeader, validateCookies, type AuthTokens } from "./auth/tokens";
-import { getState, setActiveNotebook } from "./state/session";
+import { getState, setActiveNotebook, addPendingTask } from "./state/session";
 import * as cache from "./state/cache";
 
 // ============================================================================
@@ -27,9 +27,27 @@ const json = (obj: unknown): string => JSON.stringify(obj, null, 2);
 async function resolveNotebookId(providedId?: string): Promise<string> {
   if (providedId) return providedId;
   
+  // 1. Check session state first
   const state = getState();
   if (state.notebookId) return state.notebookId;
   
+  // 2. Check cache (avoid race with session.created preload)
+  const cached = cache.get<Array<{ id: string; title: string }>>(cache.key.notebooks());
+  if (cached) {
+    if (cached.length === 1) {
+      setActiveNotebook(cached[0].id, cached[0].title);
+      return cached[0].id;
+    }
+    if (cached.length === 0) {
+      throw new Error("No notebooks found. Create one first with notebook_create.");
+    }
+    throw new Error(
+      `Multiple notebooks exist (${cached.length}). Please specify notebook_id.\n` +
+      `Available: ${cached.slice(0, 5).map(n => `${n.title} (${n.id})`).join(", ")}`
+    );
+  }
+  
+  // 3. Fetch from API if no cache
   const client = getClient();
   const notebooks = await client.listNotebooks();
   cache.set(cache.key.notebooks(), notebooks);
@@ -432,6 +450,15 @@ const research_start = tool({
       );
       
       if (!wait) {
+        // Register pending task for background polling
+        addPendingTask({
+          id: task.taskId,
+          type: 'research',
+          notebookId,
+          status: 'pending',
+          startedAt: Date.now(),
+        });
+        
         return json({
           task_id: task.taskId,
           notebook_id: notebookId,
@@ -447,7 +474,7 @@ const research_start = tool({
       while (Date.now() - startTime < maxWait) {
         await new Promise(r => setTimeout(r, pollInterval));
         
-        const status = await client.pollResearch(task.taskId, notebookId);
+        const status = await client.pollResearch(notebookId, task.taskId);
         
         if (status.status === "completed") {
           // Auto-import sources (returns count)
@@ -528,6 +555,15 @@ const studio_create = tool({
       const artifactId = await client.createStudioContent(notebookId, args.type as any, opts);
       
       if (!wait) {
+        // Register pending task for background polling
+        addPendingTask({
+          id: artifactId,
+          type: 'studio',
+          notebookId,
+          status: 'pending',
+          startedAt: Date.now(),
+        });
+        
         return json({
           artifact_id: artifactId,
           type: args.type,

@@ -137,6 +137,15 @@ export function statusToError(statusCode: number, message?: string): StructuredE
 }
 
 /**
+ * Check if error message indicates auth failure
+ */
+export function isAuthErrorMessage(message: string): boolean {
+  return message.includes('RPC Error 16') || 
+         message.includes('Authentication expired') ||
+         message.includes('auth');
+}
+
+/**
  * Wrapper for fetch with retry logic
  */
 export async function fetchWithRecovery<T>(
@@ -153,7 +162,7 @@ export async function fetchWithRecovery<T>(
     try {
       const response = await fetchFn();
 
-      // Auth error - try refresh once
+      // Auth error from HTTP status - try refresh once
       if (isAuthError(response.status) && onAuthError && !authRetried) {
         authRetried = true;
         const refreshed = await onAuthError();
@@ -179,14 +188,44 @@ export async function fetchWithRecovery<T>(
         throw statusToError(response.status);
       }
 
-      // Success
-      return await parseFn(response);
+      // Success - parse response
+      try {
+        return await parseFn(response);
+      } catch (parseErr) {
+        // Check if parse error is auth-related (RPC Error 16)
+        const errMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+        if (isAuthErrorMessage(errMsg) && onAuthError && !authRetried) {
+          authRetried = true;
+          const refreshed = await onAuthError();
+          if (refreshed) {
+            continue; // Retry with fresh auth
+          }
+        }
+        throw parseErr;
+      }
     } catch (err) {
       lastError = err as Error;
       
       // If it's already a structured error, don't wrap it
       if ((err as StructuredError).error === true) {
         throw err;
+      }
+
+      // Check if error is auth-related (RPC Error 16)
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (isAuthErrorMessage(errMsg) && onAuthError && !authRetried) {
+        authRetried = true;
+        const refreshed = await onAuthError();
+        if (refreshed) {
+          continue; // Retry with fresh auth
+        }
+        throw createError(
+          ErrorCodes.AUTH_EXPIRED,
+          errMsg,
+          true,
+          undefined,
+          'Run save_auth_tokens with fresh cookies from browser'
+        );
       }
 
       // Network/timeout errors - retry

@@ -89,3 +89,36 @@ function hash(str: string): string {
 export function stats(): { size: number } {
   return { size: store.size };
 }
+
+// ============================================================================
+// Periodic Cleanup (sweep expired entries)
+// ============================================================================
+
+export function sweep(): number {
+  const now = Date.now();
+  let cleaned = 0;
+  
+  for (const [key, entry] of store.entries()) {
+    if (now > entry.e) {
+      store.delete(key);
+      cleaned++;
+    }
+  }
+  
+  return cleaned;
+}
+
+// Auto-sweep every 5 minutes (if module stays loaded)
+let sweepInterval: ReturnType<typeof setInterval> | null = null;
+
+export function startAutoSweep(intervalMs: number = 5 * 60 * 1000): void {
+  if (sweepInterval) return;
+  sweepInterval = setInterval(sweep, intervalMs);
+}
+
+export function stopAutoSweep(): void {
+  if (sweepInterval) {
+    clearInterval(sweepInterval);
+    sweepInterval = null;
+  }
+}

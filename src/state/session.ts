@@ -9,6 +9,7 @@ export interface PendingTask {
   status: 'pending' | 'processing' | 'complete' | 'error';
   startedAt: number;
   lastCheckedAt?: number;
+  retryCount?: number;
   result?: unknown;
   error?: string;
 }
@@ -210,4 +211,19 @@ export function getContextSummary(): string {
   }
   
   return parts.length > 0 ? parts.join('\n') : 'No active context';
+}
+
+/**
+ * Cleanup stale pending tasks (older than maxAgeMs)
+ */
+export function cleanupStaleTasks(maxAgeMs: number = 10 * 60 * 1000): number {
+  const now = Date.now();
+  const before = state.pendingTasks.length;
+  const filtered = state.pendingTasks.filter(t => now - t.startedAt < maxAgeMs);
+  
+  if (filtered.length !== before) {
+    updateState({ pendingTasks: filtered });
+  }
+  
+  return before - filtered.length;
 }

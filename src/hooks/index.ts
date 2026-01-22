@@ -2,6 +2,7 @@
  * OpenCode Hooks - Enhanced with context inference
  */
 import { getClient } from '../client/api';
+import { loadCachedTokens, validateCookies } from '../auth/tokens';
 import {
   getState,
   setActiveNotebook,
@@ -12,9 +13,10 @@ import {
   updatePendingTask,
   removePendingTask,
   getContextSummary,
+  reset,
+  cleanupStaleTasks,
 } from '../state/session';
 import * as cache from '../state/cache';
-import { loadCachedTokens, validateCookies } from '../auth/tokens';
 
 // ============================================================================
 // Types
@@ -68,16 +70,18 @@ export async function onToolExecuteBefore(context: BeforeContext): Promise<HookR
   
   // Cache check for read operations
   if (toolName === 'notebook_list') {
-    const cached = cache.get(cache.key.notebooks());
+    const cached = cache.get<unknown[]>(cache.key.notebooks());
     if (cached) {
-      return { skipExecution: true, result: JSON.stringify(cached) };
+      // Return same shape as tool output (object with count and notebooks)
+      return { skipExecution: true, result: JSON.stringify({ count: cached.length, notebooks: cached }) };
     }
   }
   
   if (toolName === 'notebook_get' && args.notebook_id) {
     const cacheKey = cache.key.notebook(args.notebook_id as string);
-    const cached = cache.get(cacheKey);
-    if (cached && !args.include_summary) {
+    const cached = cache.get<Record<string, unknown>>(cacheKey);
+    // Only return cached if it's the right shape (object with id, title, sources)
+    if (cached && typeof cached === 'object' && 'id' in cached && !args.include_summary) {
       return { skipExecution: true, result: JSON.stringify(cached) };
     }
   }
@@ -101,13 +105,19 @@ export async function onToolExecuteAfter(context: AfterContext): Promise<void> {
     return;
   }
   
-  // Update notebook context
-  if (toolName === 'notebook_list' && Array.isArray(data)) {
-    cache.set(cache.key.notebooks(), data);
-    
-    // Auto-set current notebook if only one
-    if (data.length === 1) {
-      setActiveNotebook(data[0].id, data[0].title);
+  // Update notebook context from notebook_list (expects {count, notebooks} shape)
+  if (toolName === 'notebook_list' && data && typeof data === 'object') {
+    const listData = data as { notebooks?: unknown[] };
+    if (Array.isArray(listData.notebooks)) {
+      cache.set(cache.key.notebooks(), listData.notebooks);
+      
+      // Auto-set current notebook if only one
+      if (listData.notebooks.length === 1) {
+        const nb = listData.notebooks[0] as { id?: string; title?: string };
+        if (nb.id) {
+          setActiveNotebook(nb.id, nb.title || null);
+        }
+      }
     }
   }
   
@@ -143,11 +153,12 @@ export async function onToolExecuteAfter(context: AfterContext): Promise<void> {
     }
   }
   
-  // Update conversation context
+  // Update conversation context (tool returns conversation_id, not conversationId)
   if (toolName === 'notebook_query' && data && typeof data === 'object') {
-    const q = data as { conversationId?: string; query?: string; answer?: string };
-    if (q.conversationId) {
-      setConversation(q.conversationId, args.query as string, q.answer);
+    const q = data as { conversation_id?: string; conversationId?: string; query?: string; answer?: string };
+    const convId = q.conversation_id || q.conversationId;
+    if (convId) {
+      setConversation(convId, args.query as string, q.answer);
     }
   }
   
@@ -175,7 +186,20 @@ export async function onSessionIdle(): Promise<HookResult | void> {
   const pending = getPendingTasks();
   if (pending.length === 0) return;
   
-  const client = getClient();
+  // Cleanup stale tasks first (older than 10 minutes)
+  cleanupStaleTasks(10 * 60 * 1000);
+  
+  // Guard: check if client can be created
+  let client: ReturnType<typeof getClient>;
+  try {
+    client = getClient();
+  } catch {
+    // No valid tokens, skip polling
+    return;
+  }
+  
+  // Collect all notifications (don't return early - process all tasks)
+  const notifications: string[] = [];
   
   for (const task of pending) {
     // Skip if recently checked (within 5 seconds)
@@ -192,15 +216,10 @@ export async function onSessionIdle(): Promise<HookResult | void> {
           await client.importResearchSources(task.notebookId, task.id);
           removePendingTask(task.id);
           cache.del(cache.key.notebook(task.notebookId));
-          
-          return {
-            notification: `Research complete: Found ${status.sources?.length || 0} sources`,
-          };
+          notifications.push(`Research complete: Found ${status.sources?.length || 0} sources`);
         } else if (status.status === 'failed') {
           removePendingTask(task.id);
-          return {
-            notification: `Research failed`,
-          };
+          notifications.push(`Research failed`);
         } else {
           updatePendingTask(task.id, { status: 'processing' });
         }
@@ -212,24 +231,32 @@ export async function onSessionIdle(): Promise<HookResult | void> {
         
         if (artifact?.status === 'ready') {
           removePendingTask(task.id);
-          return {
-            notification: `Studio content ready: ${task.id}`,
-          };
+          notifications.push(`Studio content ready: ${task.id.slice(0, 8)}`);
         } else if (artifact?.status === 'failed') {
           removePendingTask(task.id);
-          return {
-            notification: `Studio generation failed`,
-          };
+          notifications.push(`Studio generation failed`);
         } else {
           updatePendingTask(task.id, { status: 'processing' });
         }
       }
     } catch (error) {
-      // Silently handle polling errors
-      updatePendingTask(task.id, { 
-        error: error instanceof Error ? error.message : 'Polling failed' 
-      });
+      // Track retry count, remove after 3 failures
+      const retryCount = task.retryCount || 0;
+      if (retryCount >= 3) {
+        removePendingTask(task.id);
+        notifications.push(`Task ${task.id.slice(0, 8)} removed after 3 failed retries`);
+      } else {
+        updatePendingTask(task.id, { 
+          error: error instanceof Error ? error.message : 'Polling failed',
+          retryCount: retryCount + 1,
+        });
+      }
     }
+  }
+  
+  // Return combined notification if any
+  if (notifications.length > 0) {
+    return { notification: notifications.join('; ') };
   }
 }
 
@@ -238,6 +265,9 @@ export async function onSessionIdle(): Promise<HookResult | void> {
 // ============================================================================
 
 export async function onSessionCreated(): Promise<HookResult | void> {
+  // Reset state for new session
+  reset();
+  
   // Check auth tokens
   const tokens = loadCachedTokens();
   if (!tokens) {

@@ -49,6 +49,7 @@ export class NotebookLMClient {
   private sessionId: string;
   private conversationCache: Map<string, ConversationTurn[]> = new Map();
   private reqidCounter: number;
+  private authRefreshPromise: Promise<boolean> | null = null;
 
   constructor(cookies: Record<string, string>, csrfToken = "", sessionId = "") {
     this.cookies = cookies;
@@ -56,9 +57,19 @@ export class NotebookLMClient {
     this.sessionId = sessionId;
     this.reqidCounter = Math.floor(Math.random() * 900000) + 100000;
 
-    // Refresh CSRF if not provided
+    // Schedule CSRF refresh if not provided (will be awaited on first RPC call)
     if (!this.csrfToken) {
-      this.refreshAuthTokens();
+      this.authRefreshPromise = this.refreshAuthTokens();
+    }
+  }
+
+  /**
+   * Ensure auth is ready before making API calls
+   */
+  private async ensureAuth(): Promise<void> {
+    if (this.authRefreshPromise) {
+      await this.authRefreshPromise;
+      this.authRefreshPromise = null;
     }
   }
 
@@ -253,6 +264,9 @@ export class NotebookLMClient {
     path = "/",
     timeout: number = CONSTANTS.DEFAULT_TIMEOUT
   ): Promise<unknown> {
+    // Ensure auth is ready before making calls
+    await this.ensureAuth();
+    
     const body = this.buildRequestBody(rpcId, params);
     const url = this.buildUrl(rpcId, path);
 
@@ -274,7 +288,11 @@ export class NotebookLMClient {
       async (response) => {
         const text = await response.text();
         const parsed = this.parseResponse(text);
-        return this.extractRpcResult(parsed, rpcId);
+        const result = this.extractRpcResult(parsed, rpcId);
+        
+        // extractRpcResult throws "RPC Error 16" for auth errors
+        // This will be caught and trigger auth refresh via onAuthError
+        return result;
       },
       async () => {
         // Auth refresh callback
