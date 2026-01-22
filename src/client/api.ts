@@ -632,8 +632,9 @@ export class NotebookLMClient {
     // Generate conversation ID if new conversation
     const effectiveConversationId = conversationId || crypto.randomUUID();
 
-    // Build sources array: [[[sid]]] for each source (3 brackets!)
-    const sourcesArray = effectiveSourceIds.map((sid) => [[[sid]]]);
+    // Build sources array: [[sid]] for each source (2 brackets per source!)
+    // Reference: sources_array = [[[sid]] for sid in source_ids] creates [[[s1]], [[s2]]]
+    const sourcesArray = effectiveSourceIds.map((sid) => [[sid]]);
 
     // Query params structure (matching reference implementation)
     const queryParams = [
@@ -687,32 +688,108 @@ export class NotebookLMClient {
   }
 
   private parseQueryResponse(text: string): { answer: string; newConversationId: string | null } {
-    // Parse streaming response chunks
-    const lines = text.split("\n");
-    let answer = "";
+    // Remove anti-XSSI prefix
+    let responseText = text;
+    if (responseText.startsWith(")]}'")) {
+      responseText = responseText.slice(4);
+    }
+
+    const lines = responseText.trim().split("\n");
+    let longestAnswer = "";
+    let longestThinking = "";
     let conversationId: string | null = null;
 
-    for (const line of lines) {
-      if (!line.trim()) continue;
+    // Parse chunks - prioritize type 1 (answers) over type 2 (thinking)
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i].trim();
+      if (!line) {
+        i++;
+        continue;
+      }
 
-      try {
-        const data = JSON.parse(line);
-        if (Array.isArray(data)) {
-          // Extract answer chunks
-          if (data[0]?.[0]) {
-            answer += data[0][0];
-          }
-          // Extract conversation ID
-          if (data[1]) {
-            conversationId = data[1];
+      // Try to parse as byte count (indicates next line is JSON)
+      const byteCount = parseInt(line, 10);
+      if (!isNaN(byteCount) && byteCount > 0) {
+        i++;
+        if (i < lines.length) {
+          const { text: extractedText, isAnswer } = this.extractAnswerFromChunk(lines[i]);
+          if (extractedText) {
+            if (isAnswer && extractedText.length > longestAnswer.length) {
+              longestAnswer = extractedText;
+            } else if (!isAnswer && extractedText.length > longestThinking.length) {
+              longestThinking = extractedText;
+            }
           }
         }
-      } catch {
-        // Skip non-JSON lines
+        i++;
+      } else {
+        // Not a byte count, try to parse as JSON directly
+        const { text: extractedText, isAnswer } = this.extractAnswerFromChunk(line);
+        if (extractedText) {
+          if (isAnswer && extractedText.length > longestAnswer.length) {
+            longestAnswer = extractedText;
+          } else if (!isAnswer && extractedText.length > longestThinking.length) {
+            longestThinking = extractedText;
+          }
+        }
+        i++;
       }
     }
 
+    // Return answer if found, otherwise fall back to thinking
+    const answer = longestAnswer || longestThinking;
     return { answer, newConversationId: conversationId };
+  }
+
+  private extractAnswerFromChunk(jsonStr: string): { text: string | null; isAnswer: boolean } {
+    try {
+      const data = JSON.parse(jsonStr);
+      if (!Array.isArray(data) || data.length === 0) {
+        return { text: null, isAnswer: false };
+      }
+
+      for (const item of data) {
+        if (!Array.isArray(item) || item.length < 3) continue;
+        if (item[0] !== "wrb.fr") continue;
+
+        const innerJsonStr = item[2];
+        if (typeof innerJsonStr !== "string") continue;
+
+        try {
+          const innerData = JSON.parse(innerJsonStr);
+
+          // Type indicator is at innerData[0][4][-1]: 1 = answer, 2 = thinking
+          if (Array.isArray(innerData) && innerData.length > 0) {
+            const firstElem = innerData[0];
+            if (Array.isArray(firstElem) && firstElem.length > 0) {
+              const answerText = firstElem[0];
+              if (typeof answerText === "string" && answerText.length > 20) {
+                // Check type indicator at firstElem[4][-1]
+                let isAnswer = false;
+                if (firstElem.length > 4 && Array.isArray(firstElem[4])) {
+                  const typeInfo = firstElem[4];
+                  // The type is at the last element: 1 (answer) or 2 (thinking)
+                  const lastType = typeInfo[typeInfo.length - 1];
+                  if (typeof lastType === "number") {
+                    isAnswer = lastType === 1;
+                  }
+                }
+                return { text: answerText, isAnswer };
+              }
+            } else if (typeof firstElem === "string" && firstElem.length > 20) {
+              return { text: firstElem, isAnswer: false };
+            }
+          }
+        } catch {
+          continue;
+        }
+      }
+    } catch {
+      // Skip non-JSON lines
+    }
+
+    return { text: null, isAnswer: false };
   }
 
   private buildConversationHistory(conversationId: string): unknown[] | null {
