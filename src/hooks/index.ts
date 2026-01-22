@@ -1,5 +1,5 @@
 /**
- * OpenCode Hooks - Enhanced with context inference
+ * OpenCode Hooks - Enhanced with unified event handler and context inference
  */
 import { getClient } from '../client/api';
 import { loadCachedTokens, validateCookies } from '../auth/tokens';
@@ -41,6 +41,14 @@ interface HookResult {
   notification?: string;
 }
 
+interface PluginContext {
+  client: {
+    app: {
+      log: (opts: { level: string; message: string }) => void;
+    };
+  };
+}
+
 // Tools that need notebook context
 const NOTEBOOK_CONTEXT_TOOLS = [
   'notebook_get',
@@ -54,6 +62,154 @@ const NOTEBOOK_CONTEXT_TOOLS = [
 
 // Tools that update source context
 const SOURCE_CONTEXT_TOOLS = ['source_get', 'source_add'];
+
+// ============================================================================
+// Plugin Context Management
+// ============================================================================
+
+let pluginContext: PluginContext | null = null;
+
+export function setPluginContext(ctx: PluginContext): void {
+  pluginContext = ctx;
+}
+
+export function getPluginContext(): PluginContext | null {
+  return pluginContext;
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+function showToast(message: string, level: 'info' | 'success' | 'error' = 'info'): void {
+  if (pluginContext?.client?.app?.log) {
+    pluginContext.client.app.log({ level, message: `[NotebookLM] ${message}` });
+  }
+}
+
+// ============================================================================
+// Session Event Handlers
+// ============================================================================
+
+async function handleSessionCreated(): Promise<void> {
+  // Reset state for new session
+  reset();
+  
+  // Check auth tokens
+  const tokens = loadCachedTokens();
+  if (!tokens) {
+    setAuthStatus(false);
+    showToast('No auth tokens. Run save_auth_tokens first.', 'error');
+    return;
+  }
+  
+  if (!validateCookies(tokens.cookies)) {
+    setAuthStatus(false);
+    showToast('Invalid cookies. Please refresh tokens.', 'error');
+    return;
+  }
+  
+  setAuthStatus(true);
+  
+  // Preload notebooks
+  try {
+    const client = getClient();
+    const notebooks = await client.listNotebooks();
+    cache.set(cache.key.notebooks(), notebooks);
+    
+    // Auto-set if single notebook
+    if (notebooks.length === 1) {
+      setActiveNotebook(notebooks[0].id, notebooks[0].title);
+      showToast(`Ready. Active notebook: "${notebooks[0].title}"`, 'success');
+      return;
+    }
+    
+    showToast(`Ready. ${notebooks.length} notebooks available.`, 'success');
+  } catch {
+    showToast('Failed to preload notebooks.', 'error');
+  }
+}
+
+async function handleSessionIdle(): Promise<void> {
+  const pending = getPendingTasks();
+  if (pending.length === 0) return;
+  
+  // Cleanup stale tasks first (older than 10 minutes)
+  cleanupStaleTasks(10 * 60 * 1000);
+  
+  // Guard: check if client can be created
+  let client: ReturnType<typeof getClient>;
+  try {
+    client = getClient();
+  } catch {
+    // No valid tokens, skip polling
+    return;
+  }
+  
+  for (const task of pending) {
+    // Skip if recently checked (within 5 seconds)
+    if (task.lastCheckedAt && Date.now() - task.lastCheckedAt < 5000) {
+      continue;
+    }
+    
+    try {
+      if (task.type === 'research') {
+        const status = await client.pollResearch(task.notebookId, task.id);
+        
+        if (status.status === 'completed') {
+          // Auto-import sources
+          await client.importResearchSources(task.notebookId, task.id);
+          removePendingTask(task.id);
+          cache.del(cache.key.notebook(task.notebookId));
+          showToast(`Research complete: Found ${status.sources?.length || 0} sources`, 'success');
+        } else if (status.status === 'failed') {
+          removePendingTask(task.id);
+          showToast('Research failed', 'error');
+        } else {
+          updatePendingTask(task.id, { status: 'processing' });
+        }
+      }
+      
+      if (task.type === 'studio') {
+        const artifacts = await client.pollStudioStatus(task.notebookId);
+        const artifact = artifacts.find(a => a.id === task.id);
+        
+        if (artifact?.status === 'ready') {
+          removePendingTask(task.id);
+          showToast(`Studio content ready: ${task.id.slice(0, 8)}`, 'success');
+        } else if (artifact?.status === 'failed') {
+          removePendingTask(task.id);
+          showToast('Studio generation failed', 'error');
+        } else {
+          updatePendingTask(task.id, { status: 'processing' });
+        }
+      }
+    } catch (error) {
+      // Track retry count, remove after 3 failures
+      const retryCount = task.retryCount || 0;
+      if (retryCount >= 3) {
+        removePendingTask(task.id);
+        showToast(`Task ${task.id.slice(0, 8)} removed after 3 failed retries`, 'error');
+      } else {
+        updatePendingTask(task.id, { 
+          error: error instanceof Error ? error.message : 'Polling failed',
+          retryCount: retryCount + 1,
+        });
+      }
+    }
+  }
+}
+
+function handleSessionDeleted(): void {
+  // Cleanup on session end
+  reset();
+  cache.clear();
+  // Clear any pending tasks
+  const pending = getPendingTasks();
+  for (const task of pending) {
+    removePendingTask(task.id);
+  }
+}
 
 // ============================================================================
 // Before tool execution - context inference & cache check
@@ -179,134 +335,25 @@ export async function onSessionCompacting(): Promise<HookResult> {
 }
 
 // ============================================================================
-// Session idle - poll pending tasks
+// Unified Event Handler
 // ============================================================================
 
-export async function onSessionIdle(): Promise<HookResult | void> {
-  const pending = getPendingTasks();
-  if (pending.length === 0) return;
+export async function onEvent(ctx: { event: { type: string; data?: unknown } }): Promise<void> {
+  const { event } = ctx;
   
-  // Cleanup stale tasks first (older than 10 minutes)
-  cleanupStaleTasks(10 * 60 * 1000);
-  
-  // Guard: check if client can be created
-  let client: ReturnType<typeof getClient>;
-  try {
-    client = getClient();
-  } catch {
-    // No valid tokens, skip polling
-    return;
-  }
-  
-  // Collect all notifications (don't return early - process all tasks)
-  const notifications: string[] = [];
-  
-  for (const task of pending) {
-    // Skip if recently checked (within 5 seconds)
-    if (task.lastCheckedAt && Date.now() - task.lastCheckedAt < 5000) {
-      continue;
-    }
-    
-    try {
-      if (task.type === 'research') {
-        const status = await client.pollResearch(task.notebookId, task.id);
-        
-        if (status.status === 'completed') {
-          // Auto-import sources
-          await client.importResearchSources(task.notebookId, task.id);
-          removePendingTask(task.id);
-          cache.del(cache.key.notebook(task.notebookId));
-          notifications.push(`Research complete: Found ${status.sources?.length || 0} sources`);
-        } else if (status.status === 'failed') {
-          removePendingTask(task.id);
-          notifications.push(`Research failed`);
-        } else {
-          updatePendingTask(task.id, { status: 'processing' });
-        }
-      }
-      
-      if (task.type === 'studio') {
-        const artifacts = await client.pollStudioStatus(task.notebookId);
-        const artifact = artifacts.find(a => a.id === task.id);
-        
-        if (artifact?.status === 'ready') {
-          removePendingTask(task.id);
-          notifications.push(`Studio content ready: ${task.id.slice(0, 8)}`);
-        } else if (artifact?.status === 'failed') {
-          removePendingTask(task.id);
-          notifications.push(`Studio generation failed`);
-        } else {
-          updatePendingTask(task.id, { status: 'processing' });
-        }
-      }
-    } catch (error) {
-      // Track retry count, remove after 3 failures
-      const retryCount = task.retryCount || 0;
-      if (retryCount >= 3) {
-        removePendingTask(task.id);
-        notifications.push(`Task ${task.id.slice(0, 8)} removed after 3 failed retries`);
-      } else {
-        updatePendingTask(task.id, { 
-          error: error instanceof Error ? error.message : 'Polling failed',
-          retryCount: retryCount + 1,
-        });
-      }
-    }
-  }
-  
-  // Return combined notification if any
-  if (notifications.length > 0) {
-    return { notification: notifications.join('; ') };
-  }
-}
-
-// ============================================================================
-// Session created - preload & validate
-// ============================================================================
-
-export async function onSessionCreated(): Promise<HookResult | void> {
-  // Reset state for new session
-  reset();
-  
-  // Check auth tokens
-  const tokens = loadCachedTokens();
-  if (!tokens) {
-    setAuthStatus(false);
-    return {
-      notification: 'NotebookLM: No auth tokens. Run save_auth_tokens first.',
-    };
-  }
-  
-  if (!validateCookies(tokens.cookies)) {
-    setAuthStatus(false);
-    return {
-      notification: 'NotebookLM: Invalid cookies. Please refresh tokens.',
-    };
-  }
-  
-  setAuthStatus(true);
-  
-  // Preload notebooks
-  try {
-    const client = getClient();
-    const notebooks = await client.listNotebooks();
-    cache.set(cache.key.notebooks(), notebooks);
-    
-    // Auto-set if single notebook
-    if (notebooks.length === 1) {
-      setActiveNotebook(notebooks[0].id, notebooks[0].title);
-      return {
-        notification: `NotebookLM ready. Active notebook: "${notebooks[0].title}"`,
-      };
-    }
-    
-    return {
-      notification: `NotebookLM ready. ${notebooks.length} notebooks available.`,
-    };
-  } catch {
-    return {
-      notification: 'NotebookLM: Failed to preload notebooks.',
-    };
+  switch (event.type) {
+    case 'session.created':
+      await handleSessionCreated();
+      break;
+    case 'session.idle':
+      await handleSessionIdle();
+      break;
+    case 'session.deleted':
+      handleSessionDeleted();
+      break;
+    case 'tui.toast.show':
+      // Can emit toast events
+      break;
   }
 }
 
@@ -315,9 +362,8 @@ export async function onSessionCreated(): Promise<HookResult | void> {
 // ============================================================================
 
 export const hooks = {
+  'event': onEvent,
   'tool.execute.before': onToolExecuteBefore,
   'tool.execute.after': onToolExecuteAfter,
   'experimental.session.compacting': onSessionCompacting,
-  'session.idle': onSessionIdle,
-  'session.created': onSessionCreated,
 };

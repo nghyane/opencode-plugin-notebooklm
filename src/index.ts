@@ -9,7 +9,7 @@
  */
 
 import { tool } from "@opencode-ai/plugin";
-import { hooks } from "./hooks";
+import { hooks, setPluginContext } from "./hooks";
 import { getClient, resetClient } from "./client/api";
 import { saveTokensToCache, parseCookieHeader, validateCookies, type AuthTokens } from "./auth/tokens";
 import { getState, setActiveNotebook, addPendingTask } from "./state/session";
@@ -409,20 +409,20 @@ const source_delete = tool({
 // ============================================================================
 
 const research_start = tool({
-  description: "Start web research. Blocks until complete by default (use wait=false for async).",
+  description: "Start web research. Returns immediately by default (use wait=true to block).",
   args: {
     query: tool.schema.string().describe("Research query"),
     notebook_id: tool.schema.string().optional().describe("Add to existing notebook (auto-inferred)"),
     source: tool.schema.string().optional().describe("web|scholar (default: web)"),
     mode: tool.schema.string().optional().describe("quick|deep (default: quick)"),
     title: tool.schema.string().optional().describe("New notebook title if no notebook_id"),
-    wait: tool.schema.boolean().optional().describe("Wait for completion (default: true)"),
+    wait: tool.schema.boolean().optional().describe("Wait for completion (default: false)"),
     max_wait: tool.schema.number().optional().describe("Max wait seconds (default: 120)"),
   },
   async execute(args) {
     try {
       const client = getClient();
-      const wait = args.wait !== false;
+      const wait = args.wait === true;
       const maxWait = (args.max_wait ?? 120) * 1000;
       
       // Resolve or create notebook
@@ -462,8 +462,9 @@ const research_start = tool({
         return json({
           task_id: task.taskId,
           notebook_id: notebookId,
-          status: "pending",
-          message: "Research started. Check back later or use session.idle hook.",
+          status: "started",
+          message: "Research started in background. You'll be notified when complete.",
+          tip: "Use wait=true to block until complete.",
         });
       }
       
@@ -515,14 +516,14 @@ const research_start = tool({
 // ============================================================================
 
 const studio_create = tool({
-  description: "Generate studio content. Blocks until complete by default.",
+  description: "Generate studio content. Returns immediately by default (use wait=true to block).",
   args: {
     type: tool.schema.string().describe("audio|video|infographic|slide_deck|report|flashcards|quiz|data_table|mindmap"),
     notebook_id: tool.schema.string().optional().describe("Notebook UUID (auto-inferred)"),
     focus_prompt: tool.schema.string().optional().describe("Focus topic or custom instructions"),
     language: tool.schema.string().optional().describe("Language code (default: en)"),
     confirm: tool.schema.boolean().describe("Must be true to start generation"),
-    wait: tool.schema.boolean().optional().describe("Wait for completion (default: true)"),
+    wait: tool.schema.boolean().optional().describe("Wait for completion (default: false)"),
     max_wait: tool.schema.number().optional().describe("Max wait seconds (default: 180)"),
   },
   async execute(args) {
@@ -533,7 +534,7 @@ const studio_create = tool({
     try {
       const notebookId = await resolveNotebookId(args.notebook_id);
       const client = getClient();
-      const wait = args.wait !== false;
+      const wait = args.wait === true;
       const maxWait = (args.max_wait ?? 180) * 1000;
       
       // Handle mindmap separately
@@ -568,8 +569,9 @@ const studio_create = tool({
           artifact_id: artifactId,
           type: args.type,
           notebook_id: notebookId,
-          status: "pending",
-          message: "Generation started. Check back later.",
+          status: "started",
+          message: "Generation started in background. You'll be notified when ready.",
+          tip: "Use wait=true to block until complete.",
         });
       }
       
@@ -688,7 +690,10 @@ const save_auth_tokens = tool({
 // Plugin Export
 // ============================================================================
 
-export default async function plugin() {
+export default async function plugin(ctx: { client: any }) {
+  // Set plugin context for hooks to use
+  setPluginContext(ctx);
+  
   return {
     name: "notebooklm",
     tool: {
