@@ -619,18 +619,26 @@ export class NotebookLMClient {
     // Get source IDs if not provided
     let effectiveSourceIds: string[] = sourceIds || [];
     if (effectiveSourceIds.length === 0) {
-      const notebook = await this.getNotebook(notebookId);
-      // notebook is raw RPC response array. Sources are at index 1.
-      // Structure: [title, [sources], id, ...]
-      // Source structure: [[id], title, ...]
-      if (Array.isArray(notebook) && notebook.length > 1 && Array.isArray(notebook[1])) {
-         effectiveSourceIds = notebook[1].map((s: any) => {
-             if (Array.isArray(s) && Array.isArray(s[0]) && s[0].length > 0) {
-                 return s[0][0]; // ID is inside a list [[id], ...]
-             }
-             return null;
-         }).filter((id: any) => id);
+      try {
+        const notebook = await this.getNotebook(notebookId);
+        // notebook is raw RPC response array. Sources are at index 1.
+        if (Array.isArray(notebook) && notebook.length > 1 && Array.isArray(notebook[1])) {
+           effectiveSourceIds = notebook[1].map((s: any) => {
+               if (!Array.isArray(s) || s.length < 1) return null;
+               const idData = s[0];
+               // Handle both [[id]] and [id] formats, and direct id string
+               if (Array.isArray(idData) && idData.length > 0) return idData[0];
+               if (typeof idData === "string") return idData;
+               return null;
+           }).filter((id: any) => typeof id === "string" && id.length > 0);
+        }
+      } catch {
+        // Ignore error, will fail later if no sources
       }
+    }
+
+    if (effectiveSourceIds.length === 0) {
+      throw new Error("No sources found. Please add sources to the notebook or specify source_ids.");
     }
 
     // Build conversation history if this is a follow-up
@@ -696,12 +704,14 @@ export class NotebookLMClient {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Query failed: HTTP ${response.status} - ${errorText.substring(0, 1000)}`);
+      // Try to extract useful error message from HTML/text
+      const shortError = errorText.length > 200 ? errorText.substring(0, 200) + "..." : errorText;
+      throw new Error(`Query failed: HTTP ${response.status} - ${shortError}`);
     }
 
     const text = await response.text();
     
-    // Parse response with debug info
+    // Parse response
     let answer = "";
     let newConversationId: string | null = null;
     
@@ -710,14 +720,11 @@ export class NotebookLMClient {
       answer = result.answer;
       newConversationId = result.newConversationId;
     } catch (e: any) {
-      // If parsing explicitly failed (e.g. Auth error detected), rethrow
       throw e;
     }
 
     if (!answer) {
-      // Return raw response for debugging "empty result" issues
-      const preview = text.length > 500 ? text.substring(0, 500) + "..." : text;
-      throw new Error(`NotebookLM returned empty answer. Debug info:\n- Status: ${response.status}\n- SourceIDs: ${effectiveSourceIds.length}\n- Response Preview: ${preview}`);
+      throw new Error("NotebookLM returned no answer. Ensure your query is relevant to the selected sources.");
     }
 
     // Cache conversation turn
@@ -738,7 +745,6 @@ export class NotebookLMClient {
     }
 
     const lines = responseText.trim().split("\n");
-    console.error("[DEBUG] Response lines:", lines.length);
 
     let longestAnswer = "";
     let longestThinking = "";
