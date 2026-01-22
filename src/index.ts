@@ -517,7 +517,7 @@ const research_start = tool({
 const studio_create = tool({
   description: "Generate studio content. Blocks until complete by default.",
   args: {
-    type: tool.schema.string().describe("audio_overview|audio_deep_dive|briefing_doc|faq|study_guide|timeline|mindmap"),
+    type: tool.schema.string().describe("audio|video|infographic|slide_deck|report|flashcards|quiz|data_table|mindmap"),
     notebook_id: tool.schema.string().optional().describe("Notebook UUID (auto-inferred)"),
     focus_prompt: tool.schema.string().optional().describe("Focus topic or custom instructions"),
     language: tool.schema.string().optional().describe("Language code (default: en)"),
@@ -660,7 +660,7 @@ const save_auth_tokens = tool({
         return json({
           error: true,
           message: "Missing required cookies. Need: SID, HSID, SSID, APISID, SAPISID",
-          suggestion: "Copy all cookies from NotebookLM in browser DevTools > Network > any request > Request Headers > Cookie",
+          suggestion: "Open https://notebooklm.google.com > DevTools (F12) > Network > any request > copy Cookie header",
         });
       }
 
