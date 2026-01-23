@@ -74,6 +74,14 @@ export function isTokenExpired(tokens: AuthTokens, maxAgeHours = 168): boolean {
   return ageSeconds > maxAgeHours * 3600;
 }
 
+// CSRF expires faster than cookies
+export const CSRF_TTL_HOURS = 4;
+
+export function isCsrfExpired(tokens: AuthTokens): boolean {
+  const ageSeconds = Date.now() / 1000 - tokens.extractedAt;
+  return ageSeconds > CSRF_TTL_HOURS * 3600;
+}
+
 /**
  * Convert cookies dict to header string
  */

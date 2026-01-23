@@ -13,6 +13,8 @@ export interface TransportOptions {
   csrfToken: string;
   sessionId: string;
   onAuthRefresh?: () => Promise<boolean>;
+  onDiskReload?: () => Promise<boolean>;
+  onCDPRefresh?: () => Promise<boolean>;
 }
 
 export interface RpcResponse {
@@ -28,6 +30,8 @@ export class RpcTransport {
   private csrfToken: string;
   private sessionId: string;
   private onAuthRefresh?: (() => Promise<boolean>) | undefined;
+  private onDiskReload?: (() => Promise<boolean>) | undefined;
+  private onCDPRefresh?: (() => Promise<boolean>) | undefined;
   private reqidCounter: number;
   private lastRequestTime: number = 0;
   private static readonly MIN_REQUEST_INTERVAL = 500; // Rate limit guard: 500ms between requests
@@ -37,6 +41,8 @@ export class RpcTransport {
     this.csrfToken = options.csrfToken;
     this.sessionId = options.sessionId;
     this.onAuthRefresh = options.onAuthRefresh;
+    this.onDiskReload = options.onDiskReload;
+    this.onCDPRefresh = options.onCDPRefresh;
     this.reqidCounter = Math.floor(Math.random() * 900000) + 100000;
   }
 
@@ -48,6 +54,15 @@ export class RpcTransport {
     if (sessionId) {
       this.sessionId = sessionId;
     }
+  }
+
+  /**
+   * Update all auth tokens (cookies + csrf + session)
+   */
+  updateFullAuth(cookies: Record<string, string>, csrfToken: string, sessionId: string): void {
+    this.cookies = cookies;
+    this.csrfToken = csrfToken;
+    this.sessionId = sessionId;
   }
 
   /**
@@ -174,12 +189,10 @@ export class RpcTransport {
     } = {}
   ): Promise<unknown> {
     const { path = "/", timeout = Config.DEFAULT_TIMEOUT } = options;
-    
-    const body = buildRpcBody(rpcId, params, this.csrfToken);
-    const url = this.buildUrl(rpcId, path);
-    const headers = this.getHeaders();
 
     let authRetried = false;
+    let diskReloaded = false;
+    let cdpRefreshed = false;
     const maxRetries = 3;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -188,9 +201,14 @@ export class RpcTransport {
         const now = Date.now();
         const elapsed = now - this.lastRequestTime;
         if (elapsed < RpcTransport.MIN_REQUEST_INTERVAL) {
-          await new Promise(r => setTimeout(r, RpcTransport.MIN_REQUEST_INTERVAL - elapsed));
+          await Bun.sleep(RpcTransport.MIN_REQUEST_INTERVAL - elapsed);
         }
         this.lastRequestTime = Date.now();
+
+        // BUILD FRESH TOKENS EACH ATTEMPT
+        const body = buildRpcBody(rpcId, params, this.csrfToken);
+        const url = this.buildUrl(rpcId, path);
+        const headers = this.getHeaders();
 
         const response = await fetch(url, {
           method: "POST",
@@ -199,11 +217,33 @@ export class RpcTransport {
           signal: AbortSignal.timeout(timeout),
         });
 
-        // Auth error - try refresh once
+        // Auth error - try 4-layer recovery: auth refresh → disk reload → CDP → fail
         if ((response.status === 401 || response.status === 403) && !authRetried && this.onAuthRefresh) {
           authRetried = true;
           const refreshed = await this.onAuthRefresh();
           if (refreshed) continue;
+          
+          // Try disk reload
+          if (this.onDiskReload && !diskReloaded) {
+            diskReloaded = true;
+            const reloaded = await this.onDiskReload();
+            if (reloaded) {
+              authRetried = false;
+              continue;
+            }
+          }
+          
+          // Try CDP refresh
+          if (this.onCDPRefresh && !cdpRefreshed) {
+            cdpRefreshed = true;
+            const cdpOk = await this.onCDPRefresh();
+            if (cdpOk) {
+              authRetried = false;
+              diskReloaded = false;
+              continue;
+            }
+          }
+          
           throw AppError.fromStatus(response.status);
         }
 
@@ -212,7 +252,7 @@ export class RpcTransport {
           // Use longer backoff for 429 (start at 2s) vs 5xx (start at 1s)
           const baseDelay = response.status === 429 ? 2000 : 1000;
           const delay = baseDelay * Math.pow(2, attempt);
-          await new Promise(r => setTimeout(r, delay));
+          await Bun.sleep(delay);
           continue;
         }
 
@@ -226,11 +266,32 @@ export class RpcTransport {
         try {
           return this.extractResult(parsed, rpcId);
         } catch (e) {
-          // Check for auth error in RPC response
+          // Check for auth error in RPC response - 4-layer recovery
           if (isAuthError(e) && !authRetried && this.onAuthRefresh) {
             authRetried = true;
             const refreshed = await this.onAuthRefresh();
             if (refreshed) continue;
+            
+            // Try disk reload
+            if (this.onDiskReload && !diskReloaded) {
+              diskReloaded = true;
+              const reloaded = await this.onDiskReload();
+              if (reloaded) {
+                authRetried = false;
+                continue;
+              }
+            }
+            
+            // Try CDP refresh
+            if (this.onCDPRefresh && !cdpRefreshed) {
+              cdpRefreshed = true;
+              const cdpOk = await this.onCDPRefresh();
+              if (cdpOk) {
+                authRetried = false;
+                diskReloaded = false;
+                continue;
+              }
+            }
           }
           throw e;
         }
@@ -240,7 +301,7 @@ export class RpcTransport {
         // Network/timeout error - retry
         if (attempt < maxRetries) {
           const delay = 1000 * Math.pow(2, attempt);
-          await new Promise(r => setTimeout(r, delay));
+          await Bun.sleep(delay);
           continue;
         }
         

@@ -7,7 +7,8 @@
  * - Codec: Response parsing
  */
 
-import { Config } from "../config";
+import { getAuthManager } from "../auth/manager";
+import { cookiesToHeader } from "../auth/tokens";
 import { AppError } from "../errors";
 import { RpcTransport } from "./transport";
 import { NotebookService } from "./services/notebook";
@@ -15,22 +16,9 @@ import { SourceService } from "./services/source";
 import { QueryService } from "./services/query";
 import { ResearchService } from "./services/research";
 import { StudioService } from "./services/studio";
-import {
-  loadCachedTokens,
-  saveTokensToCache,
-  cookiesToHeader,
-  extractCsrfFromHtml,
-  extractSessionIdFromHtml,
-  isTokenExpired,
-  type AuthTokens,
-} from "../auth/tokens";
 
 export class NotebookLMClient {
   private transport: RpcTransport;
-  private cookies: Record<string, string>;
-  private csrfToken: string;
-  private sessionId: string;
-  private authRefreshPromise: Promise<boolean> | null = null;
 
   // Services
   readonly notebooks: NotebookService;
@@ -39,17 +27,22 @@ export class NotebookLMClient {
   readonly research: ResearchService;
   readonly studio: StudioService;
 
-  constructor(cookies: Record<string, string>, csrfToken = "", sessionId = "") {
-    this.cookies = cookies;
-    this.csrfToken = csrfToken;
-    this.sessionId = sessionId;
+  constructor() {
+    const authManager = getAuthManager();
+    const tokens = authManager.getTokens();
 
-    // Create transport
+    if (!tokens) {
+      throw AppError.authMissing();
+    }
+
+    // Create transport with AuthManager callbacks
     this.transport = new RpcTransport({
-      cookies,
-      csrfToken,
-      sessionId,
-      onAuthRefresh: () => this.refreshAuthTokens(),
+      cookies: tokens.cookies,
+      csrfToken: tokens.csrfToken,
+      sessionId: tokens.sessionId,
+      onAuthRefresh: () => authManager.refreshCsrf(),
+      onDiskReload: () => authManager.initialize(),
+      onCDPRefresh: () => authManager.refresh(),
     });
 
     // Initialize services
@@ -59,112 +52,16 @@ export class NotebookLMClient {
     this.research = new ResearchService(this.transport);
     this.studio = new StudioService(this.transport);
 
-    // Schedule CSRF refresh if not provided
-    if (!this.csrfToken) {
-      this.authRefreshPromise = this.refreshAuthTokens();
-    }
-  }
-
-  /**
-   * Ensure auth is ready before making API calls
-   * Proactively refreshes if tokens are expired
-   */
-  async ensureAuth(): Promise<void> {
-    // Wait for any in-flight refresh
-    if (this.authRefreshPromise) {
-      await this.authRefreshPromise;
-    }
-
-    // Check if tokens are expired and proactively refresh
-    const cached = loadCachedTokens();
-    if (cached && isTokenExpired(cached)) {
-      await this.refreshAuthTokens();
-    }
-  }
-
-  /**
-   * Refresh CSRF token and session ID by fetching NotebookLM homepage
-   * Uses mutex pattern to prevent concurrent refresh attempts
-   */
-  async refreshAuthTokens(): Promise<boolean> {
-    // Mutex: reuse in-flight refresh promise
-    if (this.authRefreshPromise) {
-      return this.authRefreshPromise;
-    }
-
-    this.authRefreshPromise = this.doRefreshAuthTokens().finally(() => {
-      this.authRefreshPromise = null;
+    // Subscribe to auth state changes to update transport
+    authManager.subscribe((state) => {
+      if (state.status === 'authenticated') {
+        this.transport.updateFullAuth(
+          state.tokens.cookies,
+          state.tokens.csrfToken,
+          state.tokens.sessionId
+        );
+      }
     });
-
-    return this.authRefreshPromise;
-  }
-
-  /**
-   * Internal refresh implementation
-   */
-  private async doRefreshAuthTokens(): Promise<boolean> {
-    try {
-      const response = await fetch(Config.BASE_URL + "/", {
-        headers: {
-          ...Config.PAGE_FETCH_HEADERS,
-          Cookie: cookiesToHeader(this.cookies),
-        },
-        redirect: "follow",
-      });
-
-      if (response.url.includes("accounts.google.com")) {
-        throw AppError.authExpired("Session redirected to Google login");
-      }
-
-      if (!response.ok) {
-        throw AppError.fromStatus(response.status, "Failed to refresh auth tokens");
-      }
-
-      const html = await response.text();
-
-      const csrf = extractCsrfFromHtml(html);
-      if (!csrf) {
-        throw AppError.authExpired("Could not extract CSRF token from page");
-      }
-
-      this.csrfToken = csrf;
-      this.transport.updateAuth(csrf);
-
-      const sid = extractSessionIdFromHtml(html);
-      if (sid) {
-        this.sessionId = sid;
-        this.transport.updateAuth(csrf, sid);
-      }
-
-      // Update cache
-      this.updateCachedTokens();
-      return true;
-    } catch (error) {
-      if (error instanceof AppError) {
-        throw error;
-      }
-      throw new AppError({
-        code: "AUTH_EXPIRED",
-        message: error instanceof Error ? error.message : "Auth refresh failed",
-        retryable: false,
-        suggestion: "Run 'save_auth_tokens' with fresh cookies from browser",
-      });
-    }
-  }
-
-  private updateCachedTokens(): void {
-    try {
-      const cached = loadCachedTokens();
-      const tokens: AuthTokens = {
-        cookies: this.cookies,
-        csrfToken: this.csrfToken,
-        sessionId: this.sessionId,
-        extractedAt: cached?.extractedAt || Date.now() / 1000,
-      };
-      saveTokensToCache(tokens, true);
-    } catch {
-      // Silently fail - caching is optimization
-    }
   }
 
   // =========================================================================
@@ -227,7 +124,6 @@ export class NotebookLMClient {
     conversationId?: string,
     timeout?: number
   ) {
-    await this.ensureAuth();
     return this.queries.query(notebookId, queryText, {
       ...(sourceIds && { sourceIds }),
       ...(conversationId && { conversationId }),
@@ -296,22 +192,35 @@ export class NotebookLMClient {
 // ============================================================================
 
 let _client: NotebookLMClient | null = null;
+let _clientPromise: Promise<NotebookLMClient> | null = null;
 
-export function getClient(): NotebookLMClient {
-  if (!_client) {
-    const cached = loadCachedTokens();
-    if (!cached) {
+/**
+ * Get NotebookLM client (async, single-flight)
+ * Triggers CDP auth if needed
+ */
+export async function getClient(): Promise<NotebookLMClient> {
+  // Return existing client
+  if (_client) return _client;
+  
+  // Return in-flight promise (single-flight)
+  if (_clientPromise) return _clientPromise;
+  
+  // Create new client with single-flight
+  _clientPromise = (async () => {
+    const authManager = getAuthManager();
+    const valid = await authManager.ensureValid();
+    if (!valid) {
       throw AppError.authMissing();
     }
-
-    _client = new NotebookLMClient(
-      cached.cookies,
-      cached.csrfToken,
-      cached.sessionId
-    );
+    _client = new NotebookLMClient();
+    return _client;
+  })();
+  
+  try {
+    return await _clientPromise;
+  } finally {
+    _clientPromise = null;
   }
-
-  return _client;
 }
 
 export function resetClient(): void {

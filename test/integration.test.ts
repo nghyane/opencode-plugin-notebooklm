@@ -6,20 +6,21 @@
 import { describe, test, expect, beforeAll } from "bun:test";
 
 // Skip if not integration mode
-const SKIP = !process.env.INTEGRATION;
+const SKIP = !process.env["INTEGRATION"];
 
 // Import plugin
 import plugin from "../src/index";
-import { loadCachedTokens } from "../src/auth/tokens";
+import { getAuthManager } from "../src/auth/manager";
 
 describe.skipIf(SKIP)("Integration Tests", () => {
   let tools: Awaited<ReturnType<typeof plugin>>["tool"];
 
   beforeAll(async () => {
-    // Check auth
-    const tokens = loadCachedTokens();
-    if (!tokens) {
-      throw new Error("No auth tokens. Run notebooklm-mcp-auth first.");
+    // Ensure auth via AuthManager (may trigger CDP)
+    const authManager = getAuthManager();
+    const valid = await authManager.ensureValid();
+    if (!valid) {
+      throw new Error("Auth failed. Run browser with CDP or use save_auth_tokens.");
     }
 
     const p = await plugin({ client: null });

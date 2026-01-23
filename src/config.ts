@@ -11,6 +11,16 @@ export const Config = {
   // Backend label - update when Google changes it
   BL: process.env['NOTEBOOKLM_BL'] || "boq_labs-tailwind-frontend_20260120.08_p0",
   
+  // CDP (Chrome DevTools Protocol) settings - ENABLED by default for personal use
+  CDP_ENABLED: process.env['NOTEBOOKLM_CDP_ENABLED'] !== 'false' && process.env['NOTEBOOKLM_CDP_ENABLED'] !== '0',
+  CDP_PORT: parseInt(process.env['NOTEBOOKLM_CDP_PORT'] || '9222', 10),
+  
+  // Browser selection: chrome, edge, brave (or explicit path)
+  CDP_BROWSER: process.env['NOTEBOOKLM_CDP_BROWSER'] as 'chrome' | 'edge' | 'brave' | undefined,
+  CDP_BROWSER_PATH: process.env['NOTEBOOKLM_CDP_BROWSER_PATH'],
+  // Comma-separated preference order, e.g., "edge,chrome,brave"
+  CDP_BROWSER_PREFERENCE: process.env['NOTEBOOKLM_CDP_BROWSER_PREFERENCE']?.split(',').filter(Boolean) as ('chrome' | 'edge' | 'brave')[] | undefined,
+  
   // Headers
   USER_AGENT: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
   

@@ -2,7 +2,7 @@
  * OpenCode Hooks - Enhanced with unified event handler and context inference
  */
 import { getClient } from '../client';
-import { loadCachedTokens, validateCookies } from '../auth/tokens';
+import { getAuthManager } from '../auth/manager';
 import {
   getState,
   setActiveNotebook,
@@ -95,17 +95,17 @@ async function handleSessionCreated(): Promise<void> {
   // Reset state for new session
   reset();
   
-  // Check auth tokens
-  const tokens = loadCachedTokens();
-  if (!tokens) {
-    setAuthStatus(false);
-    showToast('No auth tokens. Run save_auth_tokens first.', 'error');
-    return;
-  }
+  // Initialize auth via AuthManager
+  const authManager = getAuthManager();
+  const initialized = await authManager.initialize();
   
-  if (!validateCookies(tokens.cookies)) {
+  if (!initialized) {
     setAuthStatus(false);
-    showToast('Invalid cookies. Please refresh tokens.', 'error');
+    if (authManager.getState().status === 'unauthenticated') {
+      showToast('No auth tokens. Run save_auth_tokens first.', 'error');
+    } else {
+      showToast('Auth expired. Attempting refresh...', 'info');
+    }
     return;
   }
   
@@ -113,7 +113,7 @@ async function handleSessionCreated(): Promise<void> {
   
   // Preload notebooks
   try {
-    const client = getClient();
+    const client = await getClient();
     const notebooks = await client.listNotebooks();
     cache.set(cache.key.notebooks(), notebooks);
     
@@ -139,9 +139,9 @@ async function handleSessionIdle(): Promise<void> {
   cleanupStaleTasks(10 * 60 * 1000);
   
   // Guard: check if client can be created
-  let client: ReturnType<typeof getClient>;
+  let client: Awaited<ReturnType<typeof getClient>>;
   try {
-    client = getClient();
+    client = await getClient();
   } catch {
     // No valid tokens, skip polling
     return;

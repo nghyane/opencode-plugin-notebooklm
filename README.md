@@ -5,6 +5,7 @@ Access Google NotebookLM from OpenCode AI coding assistant.
 ## Features
 
 - **8 tools** with context inference
+- **Auto-auth via CDP** - Chrome auto-launches when needed
 - Notebook state persistence (auto-select active notebook)
 - Multi-turn conversations
 - Create & manage notebooks
@@ -39,7 +40,20 @@ cp -r opencode-plugin-notebooklm .opencode/plugins/notebooklm
 
 ## Authentication
 
-Save cookies manually in OpenCode:
+### Automatic (Recommended)
+
+Plugin auto-launches Chrome when auth is needed:
+
+1. Chrome opens with NotebookLM
+2. Login to your Google account
+3. Plugin extracts cookies automatically
+4. Done! Chrome can be closed after login
+
+**First time setup:** Just use any NotebookLM tool - Chrome will open automatically.
+
+### Manual (Fallback)
+
+If auto-auth fails, save cookies manually:
 
 ```
 save_auth_tokens({ cookies: "your-cookie-header-from-devtools" })
@@ -50,6 +64,19 @@ To get cookies:
 2. Open DevTools (F12) > Network tab
 3. Refresh page, click any request
 4. Copy the `Cookie` header value from Request Headers
+
+## Auth Recovery Flow
+
+When auth expires, plugin attempts 4-layer recovery:
+
+```
+Auth Error → Refresh CSRF → Reload Disk → CDP Auto-refresh → Manual Auth
+```
+
+1. **Refresh CSRF** - Re-extract tokens from page
+2. **Reload Disk** - Load cached tokens from `~/.notebooklm-mcp/auth.json`
+3. **CDP Auto-refresh** - Launch Chrome, extract fresh cookies
+4. **Manual Auth** - Prompt for `save_auth_tokens` (last resort)
 
 ## Tools Reference
 
@@ -86,7 +113,7 @@ To get cookies:
 
 | Tool | Description |
 |------|-------------|
-| `save_auth_tokens` | Save cookies from browser |
+| `save_auth_tokens` | Save cookies from browser (fallback) |
 
 ## Skills
 
@@ -94,7 +121,7 @@ Optional workflow guides available in `skills/`:
 
 | Skill | Description |
 |-------|-------------|
-| `nlm-index` | NotebookLM integration guide |
+| `nlm-index` | Index docs/repos to NotebookLM |
 
 Use with: `skill({ name: 'nlm-index' })`
 
@@ -198,7 +225,8 @@ src/
 ├── config.ts             # Configuration
 ├── types.ts              # TypeScript types
 ├── auth/
-│   └── tokens.ts         # Token parsing, validation, storage
+│   ├── tokens.ts         # Token parsing, validation, storage
+│   └── cdp-provider.ts   # Chrome DevTools Protocol auth (auto-launch)
 ├── hooks/
 │   └── index.ts          # OpenCode hooks (session events)
 ├── state/
@@ -206,7 +234,7 @@ src/
 │   └── cache.ts          # TTL cache with auto-sweep
 └── client/
     ├── index.ts          # NotebookLMClient (singleton with refresh mutex)
-    ├── transport.ts      # RPC transport with retry/backoff
+    ├── transport.ts      # RPC transport with 4-layer recovery
     ├── codec.ts          # Request/response encoding
     ├── encoding.ts       # Data encoding utilities
     ├── recovery.ts       # Error recovery strategies
@@ -217,18 +245,23 @@ src/
         ├── query.ts      # AI query operations
         ├── research.ts   # Web research
         └── studio.ts     # Content generation
-
-skills/
-└── nlm-index/SKILL.md    # NotebookLM integration guide
 ```
 
 ### Key Design Patterns
 
 - **Singleton client** with refresh mutex (prevents auth stampede)
+- **4-layer auth recovery**: CSRF refresh → disk reload → CDP auto-launch → manual
+- **Bun native APIs**: `Bun.spawn`, `Bun.sleep` for performance
 - **Service layer** per domain (notebook, source, query, research, studio)
 - **Transport layer** with retry/backoff and auth refresh
 - **State management**: Session (in-memory) + Cache (TTL-based)
 - **Proactive auth**: Token expiry check before requests
+
+## Requirements
+
+- Bun 1.0+
+- Google Chrome (for CDP auto-auth)
+- macOS / Linux / Windows
 
 ## License
 

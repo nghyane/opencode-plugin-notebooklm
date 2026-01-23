@@ -16,7 +16,10 @@ export class SourceService {
   constructor(private transport: RpcTransport) {}
 
   async addUrl(notebookId: string, url: string): Promise<Source | null> {
-    const params = [[[2, url]], notebookId, [2], [1, null, null, null, null, null, null, 1]];
+    // URL source format: [null,null,["url"],null,null,null,null,null,null,null,1]
+    const urlSourceData = [null, null, [url], null, null, null, null, null, null, null, 1];
+    const options = [1, null, null, null, null, null, null, null, null, null, [1]];
+    const params = [[urlSourceData], notebookId, [2], options];
     const result = await this.transport.call(
       RPC_IDS.ADD_SOURCE,
       params,
@@ -42,9 +45,10 @@ export class SourceService {
       return source ? [source] : [];
     }
     
-    // Batch add: [[2, url1], [2, url2], ...]
-    const urlParams = urls.map(url => [2, url]);
-    const params = [urlParams, notebookId, [2], [1, null, null, null, null, null, null, 1]];
+    // Batch add: each URL as [null,null,["url"],null,null,null,null,null,null,null,1]
+    const urlParams = urls.map(url => [null, null, [url], null, null, null, null, null, null, null, 1]);
+    const options = [1, null, null, null, null, null, null, null, null, null, [1]];
+    const params = [urlParams, notebookId, [2], options];
     const result = await this.transport.call(
       RPC_IDS.ADD_SOURCE,
       params,
@@ -71,8 +75,10 @@ export class SourceService {
   }
 
   async addText(notebookId: string, text: string, title = "Pasted Text"): Promise<Source | null> {
-    // Text source_data: [1, [title, text]] - title first, then text!
-    const params = [[[1, [title, text]]], notebookId, [2], [1, null, null, null, null, null, null, 1]];
+    // Text source_data: [null,["title","text"],null,2,null,null,null,null,null,null,1]
+    const textSourceData = [null, [title, text], null, 2, null, null, null, null, null, null, 1];
+    const options = [1, null, null, null, null, null, null, null, null, null, [1]];
+    const params = [[textSourceData], notebookId, [2], options];
     const result = await this.transport.call(
       RPC_IDS.ADD_SOURCE,
       params,
@@ -96,8 +102,10 @@ export class SourceService {
     title: string,
     mimeType: string
   ): Promise<Source | null> {
-    // Drive source_data: [3, [doc_id, mime_type, 1, title]]
-    const params = [[[3, [documentId, mimeType, 1, title]]], notebookId, [2], [1, null, null, null, null, null, null, 1]];
+    // Drive source_data: [[docId, mimeType, 1, title], null, null, null, null, null, null, null, null, null, 1]
+    const driveSourceData = [[documentId, mimeType, 1, title], null, null, null, null, null, null, null, null, null, 1];
+    const options = [1, null, null, null, null, null, null, null, null, null, [1]];
+    const params = [[driveSourceData], notebookId, [2], options];
     const result = await this.transport.call(
       RPC_IDS.ADD_SOURCE,
       params,

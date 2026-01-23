@@ -21,8 +21,7 @@ const notebook_list = tool({
   },
   async execute(args) {
     try {
-      const client = getClient();
-      await client.ensureAuth();
+      const client = await getClient();
       let notebooks = await client.listNotebooks();
       cache.set("notebooks", notebooks, "notebooks");
       if (args.max_results) notebooks = notebooks.slice(0, args.max_results);
@@ -48,8 +47,7 @@ const notebook_query = tool({
   },
   async execute(args) {
     try {
-      const client = getClient();
-      await client.ensureAuth();
+      const client = await getClient();
       const state = getState();
       const notebookId = args.notebook_id || state.notebookId;
       if (!notebookId) return json({ error: "No notebook. Run notebook_list first." });
@@ -72,8 +70,7 @@ const notebook_get = tool({
   },
   async execute(args) {
     try {
-      const client = getClient();
-      await client.ensureAuth();
+      const client = await getClient();
       const state = getState();
       const notebookId = args.notebook_id || state.notebookId;
       if (!notebookId) return json({ error: "No notebook selected" });
@@ -94,8 +91,7 @@ const notebook_create = tool({
   args: { title: tool.schema.string().optional().describe("Notebook title") },
   async execute(args) {
     try {
-      const client = getClient();
-      await client.ensureAuth();
+      const client = await getClient();
       const nb = await client.createNotebook(args.title);
       if (nb) { setActiveNotebook(nb.id, nb.title); cache.del("notebooks"); return json({ created: nb, url: `https://notebooklm.google.com/notebook/${nb.id}` }); }
       return json({ error: "Failed" });
@@ -117,8 +113,7 @@ const source_add = tool({
   },
   async execute(args) {
     try {
-      const client = getClient();
-      await client.ensureAuth();
+      const client = await getClient();
       const state = getState();
       const notebookId = args.notebook_id || state.notebookId;
       if (!notebookId) return json({ error: "No notebook. Run notebook_list first." });
@@ -168,8 +163,7 @@ const research_start = tool({
   },
   async execute(args) {
     try {
-      const client = getClient();
-      await client.ensureAuth();
+      const client = await getClient();
       const state = getState();
       const result = await client.startResearch(args.query, args.source, args.mode, args.notebook_id || state.notebookId || undefined, args.title);
       addPendingTask({ id: result.taskId || crypto.randomUUID(), type: "research", notebookId: result.notebookId, status: "pending", startedAt: Date.now() });
@@ -199,8 +193,7 @@ const studio_create = tool({
   },
   async execute(args) {
     try {
-      const client = getClient();
-      await client.ensureAuth();
+      const client = await getClient();
       const state = getState();
       const notebookId = args.notebook_id || state.notebookId;
       if (!notebookId) return json({ error: "No notebook" });
@@ -238,24 +231,14 @@ const save_auth_tokens = tool({
   },
 });
 
-const hooks: Partial<Hooks> = {
-  event: async ({ event }) => {
-    if (event.type === "session.created") {
-      try {
-        const client = getClient();
-        await client.ensureAuth();
-        const notebooks = await client.listNotebooks();
-        cache.set("notebooks", notebooks, "notebooks");
-        if (notebooks.length > 0) setActiveNotebook(notebooks[0]!.id, notebooks[0]!.title);
-        updateState({ authValid: true });
-      } catch { /* Auth not ready */ }
-    }
-  },
-};
+import { hooks as pluginHooks, setPluginContext } from './hooks';
 
-export default async function plugin(_ctx: { client: unknown }) {
+export default async function plugin(ctx: { client: unknown }) {
+  // Set plugin context for hooks to use
+  setPluginContext(ctx as Parameters<typeof setPluginContext>[0]);
+  
   return {
     tool: { notebook_list, notebook_query, notebook_get, notebook_create, source_add, research_start, studio_create, save_auth_tokens },
-    ...hooks,
+    ...pluginHooks,
   };
 }

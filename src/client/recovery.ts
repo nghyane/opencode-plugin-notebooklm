@@ -35,10 +35,10 @@ export function calculateBackoff(attempt: number, baseDelay: number, maxDelay: n
 }
 
 /**
- * Sleep utility
+ * Sleep utility - use Bun.sleep for better performance
  */
 export function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return Bun.sleep(ms);
 }
 
 /**
@@ -152,11 +152,15 @@ export async function fetchWithRecovery<T>(
   fetchFn: () => Promise<Response>,
   parseFn: (res: Response) => Promise<T>,
   onAuthError?: () => Promise<boolean>,
+  onDiskReload?: () => Promise<boolean>,
+  onCDPRefresh?: () => Promise<boolean>,
   options: RecoveryOptions = {}
 ): Promise<T> {
   const opts = { ...DEFAULT_OPTIONS, ...options };
   let lastError: Error | null = null;
   let authRetried = false;
+  let diskReloaded = false;
+  let cdpRefreshed = false;
 
   for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
     try {
@@ -169,6 +173,25 @@ export async function fetchWithRecovery<T>(
         if (refreshed) {
           // Retry immediately after auth refresh
           continue;
+        }
+        // If auth refresh failed and disk not tried yet
+        if (onDiskReload && !diskReloaded) {
+          diskReloaded = true;
+          const reloaded = await onDiskReload();
+          if (reloaded) {
+            authRetried = false; // Allow auth retry after disk reload
+            continue;
+          }
+        }
+        // If disk reload failed, try CDP refresh
+        if (onCDPRefresh && !cdpRefreshed) {
+          cdpRefreshed = true;
+          const refreshed = await onCDPRefresh();
+          if (refreshed) {
+            authRetried = false;
+            diskReloaded = false;
+            continue;
+          }
         }
         throw statusToError(response.status);
       }
@@ -200,6 +223,25 @@ export async function fetchWithRecovery<T>(
           if (refreshed) {
             continue; // Retry with fresh auth
           }
+          // If auth refresh failed and disk not tried yet
+          if (onDiskReload && !diskReloaded) {
+            diskReloaded = true;
+            const reloaded = await onDiskReload();
+            if (reloaded) {
+              authRetried = false; // Allow auth retry after disk reload
+              continue;
+            }
+          }
+          // If disk reload failed, try CDP refresh
+          if (onCDPRefresh && !cdpRefreshed) {
+            cdpRefreshed = true;
+            const refreshed = await onCDPRefresh();
+            if (refreshed) {
+              authRetried = false;
+              diskReloaded = false;
+              continue;
+            }
+          }
         }
         throw parseErr;
       }
@@ -218,6 +260,25 @@ export async function fetchWithRecovery<T>(
         const refreshed = await onAuthError();
         if (refreshed) {
           continue; // Retry with fresh auth
+        }
+        // If auth refresh failed and disk not tried yet
+        if (onDiskReload && !diskReloaded) {
+          diskReloaded = true;
+          const reloaded = await onDiskReload();
+          if (reloaded) {
+            authRetried = false; // Allow auth retry after disk reload
+            continue;
+          }
+        }
+        // If disk reload failed, try CDP refresh
+        if (onCDPRefresh && !cdpRefreshed) {
+          cdpRefreshed = true;
+          const refreshed = await onCDPRefresh();
+          if (refreshed) {
+            authRetried = false;
+            diskReloaded = false;
+            continue;
+          }
         }
         throw createError(
           ErrorCodes.AUTH_EXPIRED,

@@ -48,8 +48,8 @@ webfetch({ url: "https://react.dev/reference/react", format: "markdown" })
 #### Option B: GitHub Repo
 
 ```bash
-# Use gh CLI to list files
-gh api repos/vercel/ai/git/trees/main?recursive=1 --jq '.tree[].path'
+# Use gh CLI to list files (quote URL to prevent shell glob expansion)
+gh api 'repos/vercel/ai/git/trees/main?recursive=1' --jq '.tree[].path'
 
 # Filter for docs/README
 # Common patterns: README.md, docs/**, *.md, src/**/*.ts
@@ -133,7 +133,7 @@ Report:
 ```
 1. notebook_create({ title: "Vercel AI SDK" })
 
-2. gh api repos/vercel/ai/git/trees/main?recursive=1
+2. gh api 'repos/vercel/ai/git/trees/main?recursive=1'
    Filter: README.md, docs/**, packages/**/README.md
 
 3. For each doc file:
