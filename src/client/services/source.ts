@@ -35,6 +35,41 @@ export class SourceService {
     return null;
   }
 
+  async addUrls(notebookId: string, urls: string[]): Promise<Source[]> {
+    if (urls.length === 0) return [];
+    if (urls.length === 1) {
+      const source = await this.addUrl(notebookId, urls[0]!);
+      return source ? [source] : [];
+    }
+    
+    // Batch add: [[2, url1], [2, url2], ...]
+    const urlParams = urls.map(url => [2, url]);
+    const params = [urlParams, notebookId, [2], [1, null, null, null, null, null, null, 1]];
+    const result = await this.transport.call(
+      RPC_IDS.ADD_SOURCE,
+      params,
+      { 
+        path: `/notebook/${notebookId}`,
+        timeout: Config.SOURCE_ADD_TIMEOUT,
+      }
+    );
+    
+    const sources: Source[] = [];
+    if (result && Array.isArray(result)) {
+      for (let i = 0; i < result.length; i++) {
+        const sourceData = result[i];
+        if (sourceData) {
+          const sourceId = sourceData[0]?.[0];
+          const title = sourceData[1] || (urls[i] ?? "Unknown");
+          if (sourceId) {
+            sources.push({ id: sourceId, title });
+          }
+        }
+      }
+    }
+    return sources;
+  }
+
   async addText(notebookId: string, text: string, title = "Pasted Text"): Promise<Source | null> {
     // Text source_data: [1, [title, text]] - title first, then text!
     const params = [[[1, [title, text]]], notebookId, [2], [1, null, null, null, null, null, null, 1]];

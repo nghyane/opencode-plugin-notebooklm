@@ -94,11 +94,13 @@ const notebook_create = tool({
 });
 
 const source_add = tool({
-  description: "Add source (URL/Drive/text). Use skill({name:'nlm-add'}) for help.",
+  description: "Add source to notebook. Specify type explicitly: urls, drive, or text.",
   args: {
-    content: tool.schema.string().describe("URL, Drive ID, or text"),
+    urls: tool.schema.string().optional().describe("URL(s) separated by space/newline (websites, YouTube)"),
+    drive_id: tool.schema.string().optional().describe("Google Drive document ID"),
+    text: tool.schema.string().optional().describe("Plain text content"),
+    title: tool.schema.string().optional().describe("Title (required for text, optional for drive)"),
     notebook_id: tool.schema.string().optional().describe("Target notebook"),
-    title: tool.schema.string().optional().describe("Title for text"),
   },
   async execute(args) {
     try {
@@ -106,17 +108,34 @@ const source_add = tool({
       await client.ensureAuth();
       const state = getState();
       const notebookId = args.notebook_id || state.notebookId;
-      if (!notebookId) return json({ error: "No notebook" });
-      const content = args.content;
-      let source: { id: string; title: string } | null = null;
-      if (content.startsWith("http://") || content.startsWith("https://")) {
-        source = await client.addUrlSource(notebookId, content);
-      } else if (/^[a-zA-Z0-9_-]{20,}$/.test(content)) {
-        source = await client.addDriveSource(notebookId, content, args.title || "Drive Document", "application/vnd.google-apps.document");
-      } else {
-        source = await client.addTextSource(notebookId, content, args.title);
+      if (!notebookId) return json({ error: "No notebook. Run notebook_list first." });
+
+      // URLs (websites, YouTube)
+      if (args.urls) {
+        const urlList = args.urls.trim().split(/[\s\n]+/).filter(u => u.startsWith("http"));
+        if (urlList.length === 0) return json({ error: "No valid URLs found" });
+        if (urlList.length === 1) {
+          const source = await client.addUrlSource(notebookId, urlList[0]!);
+          return json(source ? { added: source } : { error: "Failed to add URL" });
+        }
+        const sources = await client.addUrlSources(notebookId, urlList);
+        return json(sources.length > 0 ? { added: sources, count: sources.length } : { error: "Failed to add URLs" });
       }
-      return json(source ? { added: source } : { error: "Failed" });
+
+      // Google Drive
+      if (args.drive_id) {
+        const source = await client.addDriveSource(notebookId, args.drive_id, args.title || "Drive Document", "application/vnd.google-apps.document");
+        return json(source ? { added: source } : { error: "Failed to add Drive document" });
+      }
+
+      // Text
+      if (args.text) {
+        if (!args.title) return json({ error: "Title required for text source" });
+        const source = await client.addTextSource(notebookId, args.text, args.title);
+        return json(source ? { added: source } : { error: "Failed to add text" });
+      }
+
+      return json({ error: "Provide urls, drive_id, or text" });
     } catch (e) { return json({ error: String(e) }); }
   },
 });

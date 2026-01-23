@@ -195,6 +195,9 @@ export class NotebookLMClient {
   async addUrlSource(notebookId: string, url: string) {
     return this.sources.addUrl(notebookId, url);
   }
+  async addUrlSources(notebookId: string, urls: string[]) {
+    return this.sources.addUrls(notebookId, urls);
+  }
   async addTextSource(notebookId: string, text: string, title?: string) {
     return this.sources.addText(notebookId, text, title);
   }
