@@ -14,8 +14,8 @@ export interface StructuredError {
   code: string;
   message: string;
   retryable: boolean;
-  suggestion?: string;
-  statusCode?: number;
+  suggestion?: string | undefined;
+  statusCode?: number | undefined;
 }
 
 const DEFAULT_OPTIONS: Required<RecoveryOptions> = {

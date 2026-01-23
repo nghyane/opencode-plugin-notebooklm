@@ -103,18 +103,13 @@ export function parseCookieHeader(header: string): Record<string, string> {
  * Extract CSRF token from NotebookLM page HTML
  */
 export function extractCsrfFromHtml(html: string): string | null {
-  const patterns = [
-    /"SNlM0e":"([^"]+)"/,
-    /at=([^&"]+)/,
-    /"FdrFJe":"([^"]+)"/,
-  ];
+  // Try SNlM0e (primary CSRF token)
+  const snMatch = html.match(/\"SNlM0e\":\"([^\"]+)\"/);
+  if (snMatch) return snMatch[1] ?? null;
 
-  for (const pattern of patterns) {
-    const match = html.match(pattern);
-    if (match) {
-      return match[1];
-    }
-  }
+  // Try at= param (fallback)
+  const atMatch = html.match(/at=([^&\"]+)/);
+  if (atMatch) return atMatch[1] ?? null;
 
   return null;
 }
@@ -131,7 +126,7 @@ export function extractSessionIdFromHtml(html: string): string | null {
   for (const pattern of patterns) {
     const match = html.match(pattern);
     if (match) {
-      return match[1];
+      return match[1] ?? null;
     }
   }
 

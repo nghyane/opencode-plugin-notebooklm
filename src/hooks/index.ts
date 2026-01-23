@@ -1,7 +1,7 @@
 /**
  * OpenCode Hooks - Enhanced with unified event handler and context inference
  */
-import { getClient } from '../client/api';
+import { getClient } from '../client';
 import { loadCachedTokens, validateCookies } from '../auth/tokens';
 import {
   getState,
@@ -119,8 +119,9 @@ async function handleSessionCreated(): Promise<void> {
     
     // Auto-set if single notebook
     if (notebooks.length === 1) {
-      setActiveNotebook(notebooks[0].id, notebooks[0].title);
-      showToast(`Ready. Active notebook: "${notebooks[0].title}"`, 'success');
+      const notebook = notebooks[0];
+      setActiveNotebook(notebook?.id ?? null, notebook?.title ?? null);
+      showToast(`Ready. Active notebook: "${notebook?.title}"`, 'success');
       return;
     }
     
@@ -220,7 +221,7 @@ export async function onToolExecuteBefore(context: BeforeContext): Promise<HookR
   const state = getState();
   
   // Inject notebook_id if not provided and we have context
-  if (NOTEBOOK_CONTEXT_TOOLS.includes(toolName) && !args.notebook_id && state.notebookId) {
+  if (NOTEBOOK_CONTEXT_TOOLS.includes(toolName) && !args['notebook_id'] && state.notebookId) {
     context.args = { ...args, notebook_id: state.notebookId };
   }
   
@@ -233,11 +234,11 @@ export async function onToolExecuteBefore(context: BeforeContext): Promise<HookR
     }
   }
   
-  if (toolName === 'notebook_get' && args.notebook_id) {
-    const cacheKey = cache.key.notebook(args.notebook_id as string);
+  if (toolName === 'notebook_get' && args['notebook_id']) {
+    const cacheKey = cache.key.notebook(args['notebook_id'] as string);
     const cached = cache.get<Record<string, unknown>>(cacheKey);
     // Only return cached if it's the right shape (object with id, title, sources)
-    if (cached && typeof cached === 'object' && 'id' in cached && !args.include_summary) {
+    if (cached && typeof cached === 'object' && 'id' in cached && !args['include_summary']) {
       return { skipExecution: true, result: JSON.stringify(cached) };
     }
   }
@@ -295,7 +296,7 @@ export async function onToolExecuteAfter(context: AfterContext): Promise<void> {
   
   if (toolName === 'notebook_delete') {
     cache.del(cache.key.notebooks());
-    if (args.notebook_id === getState().notebookId) {
+    if (args['notebook_id'] === getState().notebookId) {
       setActiveNotebook(null, null);
     }
   }
@@ -314,7 +315,7 @@ export async function onToolExecuteAfter(context: AfterContext): Promise<void> {
     const q = data as { conversation_id?: string; conversationId?: string; query?: string; answer?: string };
     const convId = q.conversation_id || q.conversationId;
     if (convId) {
-      setConversation(convId, args.query as string, q.answer);
+      setConversation(convId, args['query'] as string, q.answer);
     }
   }
   

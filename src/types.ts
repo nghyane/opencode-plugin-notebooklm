@@ -33,8 +33,8 @@ export interface Notebook {
 export interface Source {
   id: string;
   title: string;
-  type?: string;
-  url?: string;
+  type?: string | undefined;
+  url?: string | undefined;
 }
 
 export interface NotebookSummary {
@@ -87,13 +87,13 @@ export interface ResearchTask {
   notebookId: string;
   status: "pending" | "running" | "completed" | "failed";
   sources: DiscoveredSource[];
-  report?: string;
+  report?: string | undefined;
 }
 
 export interface DiscoveredSource {
   index: number;
   title: string;
-  url?: string;
+  url?: string | undefined;
   type: string;
 }
 
@@ -118,7 +118,7 @@ export interface StudioArtifact {
   id: string;
   type: StudioType;
   status: "pending" | "generating" | "ready" | "failed";
-  url?: string;
+  url?: string | undefined;
   createdAt: string;
 }
 
@@ -131,7 +131,7 @@ export type ResponseLength = "default" | "longer" | "shorter";
 
 export interface ChatConfig {
   goal: ChatGoal;
-  customPrompt?: string;
+  customPrompt?: string | undefined;
   responseLength: ResponseLength;
 }
 
@@ -141,8 +141,8 @@ export interface ChatConfig {
 
 export interface ToolResult<T = unknown> {
   status: "success" | "error" | "timeout";
-  error?: string;
-  message?: string;
+  error?: string | undefined;
+  message?: string | undefined;
   [key: string]: unknown;
 }
 
