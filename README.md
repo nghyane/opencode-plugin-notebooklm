@@ -4,13 +4,14 @@ Access Google NotebookLM from OpenCode AI coding assistant.
 
 ## Features
 
-- **13 smart tools** with context inference
+- **8 tools** with context inference
 - Auto-detect source type (URL/Drive/Text)
-- Auto-polling for long operations (research, studio)
+- Notebook state persistence (auto-select active notebook)
+- Multi-turn conversations
 - Create & manage notebooks
 - Add sources (URLs, text, Google Drive)
 - Query AI about your sources
-- Generate audio overviews, study guides, mind maps, etc.
+- Generate audio, reports, flashcards, infographics
 - Deep research with web search
 
 ## Installation
@@ -53,38 +54,47 @@ To get cookies:
 
 ## Tools Reference
 
-### Notebook Management (6 tools)
+### Notebook Management (4 tools)
 
 | Tool | Description |
 |------|-------------|
 | `notebook_list` | List all notebooks |
 | `notebook_create` | Create a new notebook |
-| `notebook_get` | Get notebook details (optional AI summary) |
-| `notebook_query` | Ask AI about sources |
-| `notebook_delete` | Delete notebook (requires confirm) |
-| `notebook_rename` | Rename a notebook |
+| `notebook_get` | Get notebook details + AI summary |
+| `notebook_query` | Ask AI about sources (multi-turn) |
 
-### Source Management (3 tools)
+### Source Management (1 tool)
 
 | Tool | Description |
 |------|-------------|
-| `source_add` | **Unified** - Add URL, Drive doc, or text (auto-detect) |
-| `source_get` | Get source content/metadata |
-| `source_delete` | Delete source (requires confirm) |
+| `source_add` | Add URL, Drive doc, or text (auto-detect) |
 
-### Research & Studio (3 tools)
+### Research & Studio (2 tools)
 
 | Tool | Description |
 |------|-------------|
-| `research_start` | Start web research (auto-polls until complete) |
-| `studio_create` | Generate content (auto-polls until complete) |
-| `studio_delete` | Delete artifact (requires confirm) |
+| `research_start` | Start web research (fast/deep mode) |
+| `studio_create` | Generate content (audio/report/flashcards/etc) |
 
 ### Auth (1 tool)
 
 | Tool | Description |
 |------|-------------|
 | `save_auth_tokens` | Save cookies from browser |
+
+## Skills
+
+Optional workflow guides available in `skills/`:
+
+| Skill | Description |
+|-------|-------------|
+| `nlm-list` | List notebooks workflow |
+| `nlm-add` | Add sources workflow |
+| `nlm-query` | Query workflow |
+| `nlm-research` | Research workflow |
+| `nlm-studio` | Studio content workflow |
+
+Use with: `skill({ name: 'nlm-query' })`
 
 ## Smart Features
 
@@ -95,46 +105,43 @@ Notebook ID is auto-inferred when:
 - A notebook was recently accessed (session state)
 
 ```
-# No need to specify notebook_id if only one notebook exists
+# No need to specify notebook_id if context is set
 notebook_query({ query: "What are the main topics?" })
 ```
 
 ### Auto-Detect Source Type
 
 `source_add` automatically detects:
-- **URL**: Content starts with `http://` or `https://`
-- **Google Drive**: Alphanumeric ID pattern (25-50 chars)
+- **URL**: Starts with `http://` or `https://`
+- **Google Drive**: Alphanumeric ID pattern (20+ chars)
 - **Text**: Everything else
 
 ```
 # These all use source_add
-source_add({ content: "https://example.com/article" })  # URL
-source_add({ content: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms" })  # Drive
-source_add({ content: "Some text content...", title: "My Notes" })  # Text
+source_add({ content: "https://example.com/article" })           # URL
+source_add({ content: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs" })     # Drive
+source_add({ content: "Some text...", title: "My Notes" })       # Text
 ```
 
-### Auto-Polling
-
-Research and studio operations block until complete by default:
+### Multi-turn Conversations
 
 ```
-# Blocks until research completes (up to 120s)
-research_start({ query: "AI trends 2025" })
+# First query
+notebook_query({ query: "What is React?" })
 
-# Use wait=false for async
-research_start({ query: "AI trends 2025", wait: false })
+# Follow-up (uses same conversation)
+notebook_query({ query: "How about hooks?", conversation_id: "..." })
 ```
 
 ## Studio Content Types
 
 `studio_create` supports:
-- `audio_overview` - Audio summary
-- `audio_deep_dive` - Detailed audio discussion
-- `briefing_doc` - Executive briefing
-- `faq` - FAQ document
-- `study_guide` - Study guide
-- `timeline` - Timeline
-- `mindmap` - Mind map visualization
+- `audio` - Audio overview/deep dive
+- `report` - Briefing document
+- `flashcards` - Study flashcards
+- `infographic` - Visual infographic
+- `slide_deck` - Presentation slides
+- `data_table` - Structured data table
 
 ## Usage Examples
 
@@ -155,7 +162,7 @@ research_start({ query: "AI trends 2025", wait: false })
 
 ```
 > Generate an audio overview of my notebook
-> Create a study guide for React hooks
+> Create flashcards for React hooks
 ```
 
 ### Research
@@ -175,23 +182,55 @@ bun run build
 
 # Type check
 bun run typecheck
+
+# Test
+bun test
 ```
 
 ## Architecture
 
 ```
 src/
-├── index.ts           # 13 smart tools with context inference
-├── client/
-│   ├── api.ts         # NotebookLM API client
-│   └── recovery.ts    # Retry, backoff, error handling
-├── hooks/index.ts     # OpenCode hooks (cache, polling)
+├── index.ts              # 8 tools + hooks
+├── errors.ts             # AppError with structured errors
+├── config.ts             # Configuration
+├── types.ts              # TypeScript types
+├── auth/
+│   └── tokens.ts         # Token parsing, validation, storage
+├── hooks/
+│   └── index.ts          # OpenCode hooks (session events)
 ├── state/
-│   ├── session.ts     # Session state management
-│   └── cache.ts       # TTL cache
-├── auth/tokens.ts     # Token management
-└── types.ts           # TypeScript types
+│   ├── session.ts        # Session state (active notebook, conversation)
+│   └── cache.ts          # TTL cache with auto-sweep
+└── client/
+    ├── index.ts          # NotebookLMClient (singleton with refresh mutex)
+    ├── transport.ts      # RPC transport with retry/backoff
+    ├── codec.ts          # Request/response encoding
+    ├── encoding.ts       # Data encoding utilities
+    ├── recovery.ts       # Error recovery strategies
+    ├── conversations.ts  # Conversation persistence
+    └── services/
+        ├── notebook.ts   # Notebook CRUD operations
+        ├── source.ts     # Source management
+        ├── query.ts      # AI query operations
+        ├── research.ts   # Web research
+        └── studio.ts     # Content generation
+
+skills/
+├── nlm-list/SKILL.md     # List notebooks workflow
+├── nlm-add/SKILL.md      # Add sources workflow
+├── nlm-query/SKILL.md    # Query workflow
+├── nlm-research/SKILL.md # Research workflow
+└── nlm-studio/SKILL.md   # Studio content workflow
 ```
+
+### Key Design Patterns
+
+- **Singleton client** with refresh mutex (prevents auth stampede)
+- **Service layer** per domain (notebook, source, query, research, studio)
+- **Transport layer** with retry/backoff and auth refresh
+- **State management**: Session (in-memory) + Cache (TTL-based)
+- **Proactive auth**: Token expiry check before requests
 
 ## License
 
