@@ -21,14 +21,26 @@ describe("Session State", () => {
     session.setConversation("conv-1", "What is X?", "X is a thing");
     
     const conv = session.getConversation();
-    expect(conv.id).toBe("conv-1");
+    expect(conv.conversationId).toBe("conv-1");
     expect(conv.lastQuery).toBe("What is X?");
     expect(conv.lastAnswer).toBe("X is a thing");
   });
 
   test("addPendingTask and removePendingTask", () => {
-    session.addPendingTask("research", "task-1", "nb-1", "AI research");
-    session.addPendingTask("studio", "task-2", "nb-1", "audio");
+    session.addPendingTask({
+      id: "task-1",
+      type: "research",
+      notebookId: "nb-1",
+      status: "pending",
+      startedAt: Date.now(),
+    });
+    session.addPendingTask({
+      id: "task-2",
+      type: "studio",
+      notebookId: "nb-1",
+      status: "pending",
+      startedAt: Date.now(),
+    });
     
     expect(session.getPendingTasks()).toHaveLength(2);
     
@@ -40,13 +52,19 @@ describe("Session State", () => {
   test("getContextSummary includes all state", () => {
     session.setActiveNotebook("nb-1", "Test Notebook");
     session.setConversation("conv-1", "Query?", "Answer");
-    session.addPendingTask("research", "task-1", "nb-1", "topic");
+    session.addPendingTask({
+      id: "task-1",
+      type: "research",
+      notebookId: "nb-1",
+      status: "pending",
+      startedAt: Date.now(),
+    });
     
     const summary = session.getContextSummary();
     
     expect(summary).toContain("Test Notebook");
     expect(summary).toContain("Query?");
-    expect(summary).toContain("research:topic");
+    expect(summary).toContain("research:");
   });
 
   test("reset clears all state", () => {

@@ -29,6 +29,8 @@ export class RpcTransport {
   private sessionId: string;
   private onAuthRefresh?: (() => Promise<boolean>) | undefined;
   private reqidCounter: number;
+  private lastRequestTime: number = 0;
+  private static readonly MIN_REQUEST_INTERVAL = 500; // Rate limit guard: 500ms between requests
 
   constructor(options: TransportOptions) {
     this.cookies = options.cookies;
@@ -182,6 +184,14 @@ export class RpcTransport {
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
+        // Rate limit guard: ensure minimum interval between requests
+        const now = Date.now();
+        const elapsed = now - this.lastRequestTime;
+        if (elapsed < RpcTransport.MIN_REQUEST_INTERVAL) {
+          await new Promise(r => setTimeout(r, RpcTransport.MIN_REQUEST_INTERVAL - elapsed));
+        }
+        this.lastRequestTime = Date.now();
+
         const response = await fetch(url, {
           method: "POST",
           headers,
@@ -197,9 +207,11 @@ export class RpcTransport {
           throw AppError.fromStatus(response.status);
         }
 
-        // Retryable server error
-        if (response.status >= 500 && attempt < maxRetries) {
-          const delay = 1000 * Math.pow(2, attempt);
+        // Retryable server error (5xx) or rate limit (429)
+        if ((response.status >= 500 || response.status === 429) && attempt < maxRetries) {
+          // Use longer backoff for 429 (start at 2s) vs 5xx (start at 1s)
+          const baseDelay = response.status === 429 ? 2000 : 1000;
+          const delay = baseDelay * Math.pow(2, attempt);
           await new Promise(r => setTimeout(r, delay));
           continue;
         }

@@ -5,7 +5,6 @@ Access Google NotebookLM from OpenCode AI coding assistant.
 ## Features
 
 - **8 tools** with context inference
-- Auto-detect source type (URL/Drive/Text)
 - Notebook state persistence (auto-select active notebook)
 - Multi-turn conversations
 - Create & manage notebooks
@@ -67,7 +66,14 @@ To get cookies:
 
 | Tool | Description |
 |------|-------------|
-| `source_add` | Add URL, Drive doc, or text (auto-detect) |
+| `source_add` | Add sources to notebook |
+
+**`source_add` parameters:**
+- `urls` - URL(s) separated by space/newline
+- `drive_id` - Google Drive document ID
+- `text` - Plain text content
+- `title` - Title (required for text)
+- `notebook_id` - Target notebook
 
 ### Research & Studio (2 tools)
 
@@ -88,13 +94,9 @@ Optional workflow guides available in `skills/`:
 
 | Skill | Description |
 |-------|-------------|
-| `nlm-list` | List notebooks workflow |
-| `nlm-add` | Add sources workflow |
-| `nlm-query` | Query workflow |
-| `nlm-research` | Research workflow |
-| `nlm-studio` | Studio content workflow |
+| `nlm-index` | NotebookLM integration guide |
 
-Use with: `skill({ name: 'nlm-query' })`
+Use with: `skill({ name: 'nlm-index' })`
 
 ## Smart Features
 
@@ -109,18 +111,18 @@ Notebook ID is auto-inferred when:
 notebook_query({ query: "What are the main topics?" })
 ```
 
-### Auto-Detect Source Type
-
-`source_add` automatically detects:
-- **URL**: Starts with `http://` or `https://`
-- **Google Drive**: Alphanumeric ID pattern (20+ chars)
-- **Text**: Everything else
+### Adding Sources
 
 ```
-# These all use source_add
-source_add({ content: "https://example.com/article" })           # URL
-source_add({ content: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs" })     # Drive
-source_add({ content: "Some text...", title: "My Notes" })       # Text
+# Add URL(s)
+source_add({ urls: "https://example.com/article" })
+source_add({ urls: "https://example1.com https://example2.com" })
+
+# Add Google Drive document
+source_add({ drive_id: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs" })
+
+# Add text content (title required)
+source_add({ text: "Some text...", title: "My Notes" })
 ```
 
 ### Multi-turn Conversations
@@ -217,11 +219,7 @@ src/
         └── studio.ts     # Content generation
 
 skills/
-├── nlm-list/SKILL.md     # List notebooks workflow
-├── nlm-add/SKILL.md      # Add sources workflow
-├── nlm-query/SKILL.md    # Query workflow
-├── nlm-research/SKILL.md # Research workflow
-└── nlm-studio/SKILL.md   # Studio content workflow
+└── nlm-index/SKILL.md    # NotebookLM integration guide
 ```
 
 ### Key Design Patterns

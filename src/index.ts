@@ -8,6 +8,7 @@ import { tool } from "@opencode-ai/plugin";
 import type { Hooks } from "@opencode-ai/plugin";
 import { getClient, resetClient } from "./client";
 import { saveTokensToCache, parseCookieHeader, validateCookies, type AuthTokens } from "./auth/tokens";
+import { AppError } from "./errors";
 import { getState, updateState, setActiveNotebook, addPendingTask } from "./state/session";
 import * as cache from "./state/cache";
 
@@ -30,7 +31,10 @@ const notebook_list = tool({
         notebooks: notebooks.map(n => ({ id: n.id, title: n.title, sources: n.sourceCount, url: `https://notebooklm.google.com/notebook/${n.id}` })),
         count: notebooks.length,
       });
-    } catch (e) { return json({ error: String(e) }); }
+    } catch (e) {
+      if (e instanceof AppError) return json({ error: e.toJSON() });
+      return json({ error: { message: String(e), code: "UNKNOWN" } });
+    }
   },
 });
 
@@ -53,7 +57,10 @@ const notebook_query = tool({
       const result = await client.query(notebookId, args.query, sourceIds, args.conversation_id);
       updateState({ conversationId: result.conversationId, lastQuery: args.query, lastAnswer: result.answer });
       return json({ answer: result.answer, conversation_id: result.conversationId });
-    } catch (e) { return json({ error: String(e) }); }
+    } catch (e) {
+      if (e instanceof AppError) return json({ error: e.toJSON() });
+      return json({ error: { message: String(e), code: "UNKNOWN" } });
+    }
   },
 });
 
@@ -75,7 +82,10 @@ const notebook_get = tool({
         args.include_summary !== false ? client.getNotebookSummary(notebookId) : null,
       ]);
       return json({ notebook: nbData, summary: summary?.summary, suggested_topics: summary?.suggestedTopics, url: `https://notebooklm.google.com/notebook/${notebookId}` });
-    } catch (e) { return json({ error: String(e) }); }
+    } catch (e) {
+      if (e instanceof AppError) return json({ error: e.toJSON() });
+      return json({ error: { message: String(e), code: "UNKNOWN" } });
+    }
   },
 });
 
@@ -89,7 +99,10 @@ const notebook_create = tool({
       const nb = await client.createNotebook(args.title);
       if (nb) { setActiveNotebook(nb.id, nb.title); cache.del("notebooks"); return json({ created: nb, url: `https://notebooklm.google.com/notebook/${nb.id}` }); }
       return json({ error: "Failed" });
-    } catch (e) { return json({ error: String(e) }); }
+    } catch (e) {
+      if (e instanceof AppError) return json({ error: e.toJSON() });
+      return json({ error: { message: String(e), code: "UNKNOWN" } });
+    }
   },
 });
 
@@ -136,7 +149,10 @@ const source_add = tool({
       }
 
       return json({ error: "Provide urls, drive_id, or text" });
-    } catch (e) { return json({ error: String(e) }); }
+    } catch (e) {
+      if (e instanceof AppError) return json({ error: e.toJSON() });
+      return json({ error: { message: String(e), code: "UNKNOWN" } });
+    }
   },
 });
 
@@ -166,7 +182,10 @@ const research_start = tool({
         }
       }
       return json({ started: result });
-    } catch (e) { return json({ error: String(e) }); }
+    } catch (e) {
+      if (e instanceof AppError) return json({ error: e.toJSON() });
+      return json({ error: { message: String(e), code: "UNKNOWN" } });
+    }
   },
 });
 
@@ -191,7 +210,10 @@ const studio_create = tool({
       const artifactId = await client.createStudioContent(notebookId, args.type, opts);
       addPendingTask({ id: artifactId || crypto.randomUUID(), type: "studio", notebookId, status: "pending", startedAt: Date.now() });
       return json({ started: { artifactId, type: args.type }, estimated: args.type === "audio" ? "2-5 min" : "30-60 sec" });
-    } catch (e) { return json({ error: String(e) }); }
+    } catch (e) {
+      if (e instanceof AppError) return json({ error: e.toJSON() });
+      return json({ error: { message: String(e), code: "UNKNOWN" } });
+    }
   },
 });
 
@@ -209,7 +231,10 @@ const save_auth_tokens = tool({
       saveTokensToCache({ cookies: parsed, csrfToken: args.csrf_token || "", sessionId: args.session_id || "", extractedAt: Date.now() / 1000 }, true);
       resetClient();
       return json({ success: true, next: "Run notebook_list to see notebooks" });
-    } catch (e) { return json({ error: String(e) }); }
+    } catch (e) {
+      if (e instanceof AppError) return json({ error: e.toJSON() });
+      return json({ error: { message: String(e), code: "UNKNOWN" } });
+    }
   },
 });
 

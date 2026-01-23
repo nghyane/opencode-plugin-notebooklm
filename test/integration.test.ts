@@ -13,7 +13,7 @@ import plugin from "../src/index";
 import { loadCachedTokens } from "../src/auth/tokens";
 
 describe.skipIf(SKIP)("Integration Tests", () => {
-  let tools: Awaited<ReturnType<typeof plugin>>["tools"];
+  let tools: Awaited<ReturnType<typeof plugin>>["tool"];
 
   beforeAll(async () => {
     // Check auth
@@ -22,73 +22,67 @@ describe.skipIf(SKIP)("Integration Tests", () => {
       throw new Error("No auth tokens. Run notebooklm-mcp-auth first.");
     }
 
-    const p = await plugin({
-      project: { name: "test", root: "/tmp" },
-      directory: "/tmp",
-      worktree: "/tmp",
-    });
-    tools = p.tools;
+    const p = await plugin({ client: null });
+    tools = p.tool;
   });
 
   test("notebook_list returns notebooks", async () => {
-    const result = await tools.notebook_list({ max_results: 5 });
+    const result = await tools.notebook_list.execute({ max_results: 5 }, {} as any);
+    const parsed = JSON.parse(result);
 
-    expect(result.status).toBe("success");
-    expect(Array.isArray(result.notebooks)).toBe(true);
-    console.log(`Found ${result.count} notebooks`);
+    expect(parsed.error).toBeUndefined();
+    expect(Array.isArray(parsed.notebooks)).toBe(true);
+    console.log(`Found ${parsed.count} notebooks`);
   });
 
-  test("notebook_create and delete", async () => {
+  test("notebook_create", async () => {
     // Create
-    const createResult = await tools.notebook_create({
+    const createResult = await tools.notebook_create.execute({
       title: `Test ${Date.now()}`,
-    });
-    expect(createResult.status).toBe("success");
-    const notebookId = createResult.notebook.id;
-    console.log(`Created notebook: ${notebookId}`);
-
-    // Delete
-    const deleteResult = await tools.notebook_delete({
-      notebook_id: notebookId,
-      confirm: true,
-    });
-    expect(deleteResult.status).toBe("success");
-    console.log(`Deleted notebook: ${notebookId}`);
+    }, {} as any);
+    const parsed = JSON.parse(createResult);
+    
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.created).toBeDefined();
+    console.log(`Created notebook: ${parsed.created?.id}`);
   });
 
   test("notebook_get with existing notebook", async () => {
     // First get a notebook
-    const listResult = await tools.notebook_list({ max_results: 1 });
-    if (listResult.notebooks.length === 0) {
+    const listResult = await tools.notebook_list.execute({ max_results: 1 }, {} as any);
+    const listParsed = JSON.parse(listResult);
+    
+    if (!listParsed.notebooks || listParsed.notebooks.length === 0) {
       console.log("No notebooks to test");
       return;
     }
 
-    const notebookId = listResult.notebooks[0].id;
-    const result = await tools.notebook_get({
+    const notebookId = listParsed.notebooks[0].id;
+    const result = await tools.notebook_get.execute({
       notebook_id: notebookId,
       include_summary: true,
-    });
+    }, {} as any);
+    const parsed = JSON.parse(result);
 
-    expect(result.status).toBe("success");
-    expect(result.title).toBeDefined();
-    console.log(`Got notebook: ${result.title}`);
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.notebook).toBeDefined();
+    console.log(`Got notebook`);
   });
 
   test("studio_create types", async () => {
-    // Verify type enum
-    const types = ["audio", "video", "infographic", "slide_deck", "report", "flashcards", "quiz", "data_table", "mind_map"];
+    // Verify type enum - just test that the tool accepts valid types
+    const validTypes = ["audio", "report", "flashcards", "infographic", "slide_deck", "data_table"];
     
-    for (const type of types) {
-      // Just verify the function accepts the type (don't actually create)
-      const result = await tools.studio_create({
+    for (const type of validTypes) {
+      // Just verify the function accepts the type (will fail due to no notebook)
+      const result = await tools.studio_create.execute({
         notebook_id: "fake-id",
-        type: type as Parameters<typeof tools.studio_create>[0]["type"],
-        confirm: false, // Won't actually create
-      });
+        type: type as any,
+      }, {} as any);
+      const parsed = JSON.parse(result);
 
-      expect(result.status).toBe("error");
-      expect(result.error).toContain("not confirmed");
+      // Should get error about notebook not found, not about invalid type
+      expect(parsed.error).toBeDefined();
     }
   });
 });

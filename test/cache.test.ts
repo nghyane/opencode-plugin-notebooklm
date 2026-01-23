@@ -26,7 +26,7 @@ describe("Cache", () => {
     cache.set("expire-key", "value");
     
     // Should exist immediately
-    expect(cache.get("expire-key")).toBe("value");
+    expect(cache.get<string>("expire-key")).toBe("value");
     
     // Note: In real test, would wait for TTL
   });
@@ -40,7 +40,7 @@ describe("Cache", () => {
     
     expect(cache.get("nb:1")).toBeUndefined();
     expect(cache.get("nb:2")).toBeUndefined();
-    expect(cache.get("src:1")).toBe("c");
+    expect(cache.get<string>("src:1")).toBe("c");
   });
 
   test("key generators", () => {
